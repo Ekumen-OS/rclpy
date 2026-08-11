@@ -38,6 +38,7 @@ find_package(rcutils REQUIRED)
 find_package(rmw REQUIRED)
 find_package(rmw_implementation_cmake REQUIRED)
 find_package(rosidl_runtime_c REQUIRED)
+find_package(rosidl_typesupport_cpython REQUIRED)
 
 # Find python before pybind11
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
@@ -93,6 +94,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/graph.cpp
   src/rclpy/guard_condition.cpp
   src/rclpy/lifecycle.cpp
+  src/rclpy/loan.cpp
   src/rclpy/logging.cpp
   src/rclpy/names.cpp
   src/rclpy/node.cpp
@@ -130,6 +132,7 @@ target_link_libraries(_rclpy_pybind11 PRIVATE
   rcpputils::rcpputils
   rcutils::rcutils
   rosidl_runtime_c::rosidl_runtime_c
+  rosidl_typesupport_cpython::rosidl_typesupport_cpython
 )
 configure_build_install_location(_rclpy_pybind11)
 
@@ -187,6 +190,7 @@ if(BUILD_TESTING)
       test/test_guard_condition.py
       test/test_init_shutdown.py
       test/test_lifecycle.py
+      test/test_loaned_message.py
       test/test_logging.py
       test/test_logging_rosout.py
       test/test_logging_service.py

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from rclpy.exceptions import NoTypeSupportImportedException
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 
 def check_for_type_support(msg_or_srv_type):
@@ -32,6 +33,11 @@ def check_for_type_support(msg_or_srv_type):
 
 
 def check_is_valid_msg_type(msg_type):
+    # A CPython typesupport handle resolves message classes (experimental
+    # classes, and any standard class with a generated CPython typesupport);
+    # those carry no legacy conversion capsules.
+    if _rclpy.get_message_typesupport_handle(msg_type):
+        return
     check_for_type_support(msg_type)
     try:
         assert None not in (
@@ -45,6 +51,27 @@ def check_is_valid_msg_type(msg_type):
             f'The message type provided is not valid ({msg_type}),'
             ' this might be a service or action'
         ) from None
+
+
+def check_are_valid_constraints(msg_type, constraints):
+    """
+    Validate a constraints argument against its message type.
+
+    Constraints are only supported for experimental message types, which carry
+    a generated ``Constraints`` inner class.  This raises early with a clear
+    error instead of failing deep inside the middleware.
+    """
+    if constraints is None:
+        return
+    constraints_type = getattr(msg_type, 'Constraints', None)
+    if constraints_type is None:
+        raise TypeError(
+            f'Constraints are only supported for experimental message types; '
+            f'{msg_type} has no Constraints class.')
+    if not isinstance(constraints, constraints_type):
+        raise TypeError(
+            f'Expected constraints of type {msg_type.__name__}.Constraints, '
+            f'got {type(constraints).__name__}.')
 
 
 def check_is_valid_srv_type(srv_type):

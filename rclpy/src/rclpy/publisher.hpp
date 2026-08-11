@@ -20,10 +20,13 @@
 #include <rcl/publisher.h>
 #include <rcl/time.h>
 
+#include <rosidl_runtime_c/message_type_support_struct.h>
+
 #include <memory>
 #include <string>
 
 #include "destroyable.hpp"
+#include "loan.hpp"
 #include "node.hpp"
 
 namespace py = pybind11;
@@ -48,10 +51,12 @@ public:
    * \param[in] pymsg_type Message type associated with the publisher.
    * \param[in] topic The name of the topic to attach the publisher to.
    * \param[in] pyqos_profile rmw_qos_profile_t object for this publisher.
+   * \param[in] pyconstraints Optional message type constraints (a Python
+   *   Msg.Constraints instance) or None.
    */
   Publisher(
     Node & node, py::object pymsg_type, std::string topic,
-    py::object pyqos_profile);
+    py::object pyqos_profile, py::object pyconstraints = py::none());
 
   /// Get the name of the logger associated with the node of the publisher.
   /**
@@ -98,6 +103,48 @@ public:
   void
   publish_raw(std::string msg);
 
+  /// Borrow a loaned message from the middleware.
+  /**
+   * Whether the middleware can loan a message for this publisher/type is
+   * decided by the rmw layer; rclpy forwards the result.  For messages whose
+   * typesupport produces Python message views (CPython typesupport), the
+   * borrowed message is a Python message instance whose containers view the
+   * middleware-owned storage directly.
+   *
+   * Raises RCLError if the middleware does not support loaning or the borrow
+   * fails (e.g. RCL_RET_CONSTRAINTS_HIT for per-loan constraints that are
+   * looser than the publisher-wide constraints).
+   *
+   * \param[in] pyconstraints Optional per-loan constraints or None.
+   * \return The borrowed Python message instance (new reference).
+   */
+  MessageLoan
+  borrow_loaned_message(py::object pyconstraints = py::none());
+
+  /// Publish a previously borrowed loaned message.
+  /**
+   * Transfers ownership of the message back to the middleware; the message
+   * instance must not be used afterwards.
+   *
+   * Raises RCLError if the message cannot be published.
+   *
+   * \param[in] pymsg The loaned message to publish.
+   */
+  void
+  publish_loaned_message(MessageLoan & loan);
+
+  /// Return a previously borrowed loaned message without publishing it.
+  /**
+   * Transfers ownership of the message back to the middleware; the message
+   * instance must not be used afterwards.
+   *
+   * Raises RCLError if the message cannot be returned.
+   *
+   * \param[in] pymsg The loaned message to return.
+   */
+  void
+  return_loaned_message(MessageLoan & loan);
+
   /// Get rcl_publisher_t pointer
   rcl_publisher_t *
   rcl_ptr() const
@@ -129,7 +176,12 @@ public:
 
 private:
   Node node_;
+  py::object pymsg_type_;
   std::shared_ptr<rcl_publisher_t> rcl_publisher_;
+  const rosidl_message_type_support_t * type_support_;
+  // True when the resolved type support is the CPython dispatch: message
+  // payloads are Python objects and can be passed to rcl directly.
+  bool is_cpython_;
 };
 /// Define a pybind11 wrapper for an rclpy::Publisher
 void define_publisher(py::object module);

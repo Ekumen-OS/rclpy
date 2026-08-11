@@ -37,6 +37,7 @@
 #include "graph.hpp"
 #include "guard_condition.hpp"
 #include "lifecycle.hpp"
+#include "loan.hpp"
 #include "logging.hpp"
 #include "logging_api.hpp"
 #include "names.hpp"
@@ -61,6 +62,8 @@ PYBIND11_MODULE(_rclpy_pybind11, m) {
   m.doc() = "ROS 2 Python client library.";
 
   rclpy::define_destroyable(m);
+
+  rclpy::define_message_loan(m);
 
   py::enum_<rcl_clock_type_t>(m, "ClockType")
   .value("UNINITIALIZED", RCL_CLOCK_UNINITIALIZED)
@@ -228,6 +231,10 @@ PYBIND11_MODULE(_rclpy_pybind11, m) {
     "rclpy_get_rmw_implementation_identifier",
     &rclpy::get_rmw_implementation_identifier,
     "Retrieve the identifier for the active RMW implementation.");
+
+  m.def(
+    "get_message_typesupport_handle", &rclpy::has_message_typesupport_handle,
+    "Return True when a CPython typesupport handle exists for the message class.");
 
   m.def(
     "rclpy_assert_liveliness", &rclpy::assert_liveliness,

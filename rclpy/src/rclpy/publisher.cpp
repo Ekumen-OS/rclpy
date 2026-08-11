@@ -31,14 +31,18 @@ namespace rclpy
 {
 Publisher::Publisher(
   Node & node, py::object pymsg_type, std::string topic,
-  py::object pyqos_profile)
-: node_(node)
+  py::object pyqos_profile, py::object pyconstraints)
+: node_(node),
+  pymsg_type_(pymsg_type),
+  type_support_(nullptr),
+  is_cpython_(false)
 {
   auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type));
+    common_get_type_support(pymsg_type, &is_cpython_));
   if (!msg_type) {
     throw py::error_already_set();
   }
+  type_support_ = msg_type;
 
   rcl_publisher_options_t publisher_ops = rcl_publisher_get_default_options();
 
@@ -65,9 +69,20 @@ Publisher::Publisher(
 
   *rcl_publisher_ = rcl_get_zero_initialized_publisher();
 
-  rcl_ret_t ret = rcl_publisher_init(
-    rcl_publisher_.get(), node_.rcl_ptr(), msg_type,
-    topic.c_str(), &publisher_ops);
+  rcl_ret_t ret;
+  if (pyconstraints.is_none()) {
+    ret = rcl_publisher_init(
+      rcl_publisher_.get(), node_.rcl_ptr(), msg_type,
+      topic.c_str(), &publisher_ops);
+  } else {
+    // The constraints struct is only valid for the duration of this call: the
+    // rmw layer clones the constraints into owned storage during init.
+    rosidl_message_type_constraints_t constraints =
+      message_constraints_from_py(pyconstraints);
+    ret = rcl_publisher_init_with_constraints(
+      rcl_publisher_.get(), node_.rcl_ptr(), msg_type, &constraints,
+      topic.c_str(), &publisher_ops);
+  }
   if (RCL_RET_OK != ret) {
     if (RCL_RET_TOPIC_NAME_INVALID == ret) {
       std::string error_text{"Failed to create publisher due to invalid topic name '"};
@@ -122,6 +137,17 @@ Publisher::get_topic_name()
 void
 Publisher::publish(py::object pymsg)
 {
+  if (is_cpython_) {
+    // CPython-typesupport messages ARE PyObject *: pass the Python object
+    // directly to rcl; the outer table (dispatched by rmw) serializes it.  No
+    // convert_from_py involved.
+    rcl_ret_t ret = rcl_publish(rcl_publisher_.get(), pymsg.ptr(), NULL);
+    if (RCL_RET_OK != ret) {
+      throw RCLError("Failed to publish");
+    }
+    return;
+  }
+
   auto raw_ros_message = convert_from_py(pymsg);
   if (!raw_ros_message) {
     throw py::error_already_set();
@@ -130,6 +156,87 @@ Publisher::publish(py::object pymsg)
   rcl_ret_t ret = rcl_publish(rcl_publisher_.get(), raw_ros_message.get(), NULL);
   if (RCL_RET_OK != ret) {
     throw RCLError("Failed to publish");
+  }
+}
+
+MessageLoan
+Publisher::borrow_loaned_message(py::object pyconstraints)
+{
+  if (!is_cpython_) {
+    // Message loaning requires a CPython typesupport: the loaned sample is a
+    // Python message view only for such typesupports.
+    throw py::type_error(
+      "loaned messages are only supported for CPython typesupport messages");
+  }
+
+  void * message = nullptr;
+  rcl_ret_t ret;
+  if (pyconstraints.is_none()) {
+    ret = rcl_borrow_loaned_message(
+      rcl_publisher_.get(), type_support_, &message);
+  } else {
+    // Per-loan constraints are cloned into owned storage by the rmw layer, so
+    // the struct only needs to be valid for the duration of this call.
+    rosidl_message_type_constraints_t constraints =
+      message_constraints_from_py(pyconstraints);
+    ret = rcl_borrow_loaned_message_with_constraints(
+      rcl_publisher_.get(), type_support_, &constraints, &message);
+  }
+  if (RCL_RET_OK != ret) {
+    // Forward the middleware decision (e.g. RCL_RET_UNSUPPORTED with the rmw
+    // error set) instead of pre-empting it in rclpy.
+    throw RCLError("Failed to borrow loaned message");
+  }
+
+  // construct_message_at returned a new reference to a Python message
+  // instance whose containers view the middleware-owned storage.
+  py::object msg_obj =
+    py::reinterpret_steal<py::object>(static_cast<PyObject *>(message));
+  if (!py::isinstance(msg_obj, pymsg_type_)) {
+    rcl_return_loaned_message_from_publisher(rcl_publisher_.get(), message);
+    rcl_reset_error();
+    throw py::type_error(
+      "loaned message is not a Python message instance of the publisher's "
+      "message type");
+  }
+  return MessageLoan(msg_obj);
+}
+
+void
+Publisher::publish_loaned_message(MessageLoan & loan)
+{
+  if (!is_cpython_) {
+    throw py::type_error(
+      "loaned messages are only supported for CPython typesupport messages");
+  }
+  // Fetching the message is destructive: the loan is consumed by this call.
+  py::object message = loan.take_message();
+  if (message.is_none()) {
+    throw py::type_error("loaned message is not valid");
+  }
+  rcl_ret_t ret = rcl_publish_loaned_message(
+    rcl_publisher_.get(), message.ptr(), NULL);
+  if (RCL_RET_OK != ret) {
+    throw RCLError("Failed to publish loaned message");
+  }
+}
+
+void
+Publisher::return_loaned_message(MessageLoan & loan)
+{
+  if (!is_cpython_) {
+    throw py::type_error(
+      "loaned messages are only supported for CPython typesupport messages");
+  }
+  // Fetching the message is destructive: the loan is consumed by this call.
+  py::object message = loan.take_message();
+  if (message.is_none()) {
+    throw py::type_error("loaned message is not valid");
+  }
+  rcl_ret_t ret = rcl_return_loaned_message_from_publisher(
+    rcl_publisher_.get(), message.ptr());
+  if (RCL_RET_OK != ret) {
+    throw RCLError("Failed to return loaned message");
   }
 }
 
@@ -163,7 +270,13 @@ void
 define_publisher(py::object module)
 {
   py::class_<Publisher, Destroyable, std::shared_ptr<Publisher>>(module, "Publisher")
-  .def(py::init<Node &, py::object, std::string, py::object>())
+  .def(
+    py::init<Node &, py::object, std::string, py::object, py::object>(),
+    py::arg("node"),
+    py::arg("msg_type"),
+    py::arg("topic"),
+    py::arg("qos_profile"),
+    py::arg("constraints") = py::none())
   .def_property_readonly(
     "pointer", [](const Publisher & publisher) {
       return reinterpret_cast<size_t>(publisher.rcl_ptr());
@@ -184,6 +297,16 @@ define_publisher(py::object module)
   .def(
     "publish_raw", &Publisher::publish_raw,
     "Publish a serialized message.")
+  .def(
+    "borrow_loaned_message", &Publisher::borrow_loaned_message,
+    py::arg("constraints") = py::none(),
+    "Borrow a loaned message from the middleware.")
+  .def(
+    "publish_loaned_message", &Publisher::publish_loaned_message,
+    "Publish a previously borrowed loaned message.")
+  .def(
+    "return_loaned_message", &Publisher::return_loaned_message,
+    "Return a previously borrowed loaned message without publishing it.")
   .def(
     "wait_for_all_acked", &Publisher::wait_for_all_acked,
     "Wait until all published message data is acknowledged");

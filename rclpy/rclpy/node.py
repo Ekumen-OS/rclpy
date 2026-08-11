@@ -82,6 +82,7 @@ from rclpy.timer import Rate
 from rclpy.timer import Timer
 from rclpy.topic_endpoint_info import TopicEndpointInfo
 from rclpy.type_description_service import TypeDescriptionService
+from rclpy.type_support import check_are_valid_constraints
 from rclpy.type_support import check_is_valid_msg_type
 from rclpy.type_support import check_is_valid_srv_type
 from rclpy.utilities import get_default_context
@@ -1516,6 +1517,7 @@ class Node:
         event_callbacks: Optional[PublisherEventCallbacks] = None,
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
         publisher_class: Type[Publisher] = Publisher,
+        constraints: Optional[Any] = None,
     ) -> Publisher:
         """
         Create a new publisher.
@@ -1529,6 +1531,9 @@ class Node:
         :param callback_group: The callback group for the publisher's event handlers.
             If ``None``, then the default callback group for the node is used.
         :param event_callbacks: User-defined callbacks for middleware events.
+        :param constraints: Optional message type constraints
+            (a ``msg_type.Constraints`` instance) bounding variable-length
+            members.  Only supported for experimental message types.
         :return: The new publisher.
         """
         qos_profile = self._validate_qos_or_depth_parameter(qos_profile)
@@ -1555,10 +1560,12 @@ class Node:
         # this line imports the typesupport for the message module if not already done
         failed = False
         check_is_valid_msg_type(msg_type)
+        check_are_valid_constraints(msg_type, constraints)
         try:
             with self.handle:
                 publisher_object = _rclpy.Publisher(
-                    self.handle, msg_type, topic, qos_profile.get_c_qos_profile())
+                    self.handle, msg_type, topic, qos_profile.get_c_qos_profile(),
+                    constraints)
         except ValueError:
             failed = True
         if failed:
@@ -1591,7 +1598,8 @@ class Node:
         event_callbacks: Optional[SubscriptionEventCallbacks] = None,
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
         raw: bool = False,
-        content_filter_options: Optional[ContentFilterOptions] = None
+        content_filter_options: Optional[ContentFilterOptions] = None,
+        constraints: Optional[Any] = None,
     ) -> Subscription:
         """
         Create a new subscription.
@@ -1610,6 +1618,9 @@ class Node:
         :param raw: If ``True``, then received messages will be stored in raw binary
             representation.
         :param content_filter_options: The filter expression and parameters for content filtering.
+        :param constraints: Optional message type constraints
+            (a ``msg_type.Constraints`` instance) bounding variable-length
+            members.  Only supported for experimental message types.
         """
         qos_profile = self._validate_qos_or_depth_parameter(qos_profile)
 
@@ -1634,11 +1645,12 @@ class Node:
         # this line imports the typesupport for the message module if not already done
         failed = False
         check_is_valid_msg_type(msg_type)
+        check_are_valid_constraints(msg_type, constraints)
         try:
             with self.handle:
                 subscription_object = _rclpy.Subscription(
                     self.handle, msg_type, topic, qos_profile.get_c_qos_profile(),
-                    content_filter_options)
+                    content_filter_options, constraints)
         except ValueError:
             failed = True
         if failed:

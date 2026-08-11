@@ -32,6 +32,46 @@ RCLError = _rclpy.RCLError
 MsgType = TypeVar('MsgType')
 
 
+class SubscribedMessageLender:
+    """
+    A context manager that lends a message taken from the middleware.
+
+    ``SubscribedMessageLender`` is returned by
+    :meth:`.Subscription.take_loaned_message`.  Entering the context manager
+    attempts a loaned take; the loan is returned to the middleware on exit.
+    A failed loaned take (unsupported by the middleware, or no data available)
+    does not raise: the context manager then yields None so the caller can
+    fall back to a regular take.
+
+    .. warning:: Users should not create a ``SubscribedMessageLender`` with
+       this constructor; use :meth:`.Subscription.take_loaned_message` instead.
+    """
+
+    def __init__(
+        self,
+        subscription_impl: _rclpy.Subscription,
+        msg_type: MsgType,
+    ) -> None:
+        self._subscription_impl = subscription_impl
+        self._msg_type = msg_type
+        self._loan = None
+
+    def __enter__(self):
+        # take_loaned_message returns a (MessageLoan, metadata) tuple, or None
+        # when the loaned take failed.  A failed take must not raise so the
+        # caller can fall back to a regular take.
+        self._loan = self._subscription_impl.take_loaned_message(self._msg_type)
+        return self._loan
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        # Return the loan on context exit.  This never leaks.
+        if self._loan is not None and self._loan[0].valid:
+            with self._subscription_impl:
+                self._subscription_impl.return_loaned_message(self._loan[0])
+        self._loan = None
+        return False
+
+
 class Subscription:
 
     class CallbackType(Enum):
@@ -88,6 +128,19 @@ class Subscription:
     @property
     def handle(self):
         return self.__subscription
+
+    def take_loaned_message(self) -> SubscribedMessageLender:
+        """
+        Attempt a loaned take from the middleware.
+
+        Enter the returned context manager to take a
+        :class:`MessageLoan`; the loan is returned to the middleware on exit.
+        A failed loaned take yields None (no exception), so callers can fall
+        back to a regular take.
+
+        :return: A :class:`SubscribedMessageLender` context manager.
+        """
+        return SubscribedMessageLender(self.handle, self.msg_type)
 
     def destroy(self):
         """

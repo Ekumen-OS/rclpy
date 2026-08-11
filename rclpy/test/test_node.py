@@ -166,7 +166,7 @@ class TestNodeAllowUndeclaredParameters(unittest.TestCase):
             with sub.handle:
                 result = sub.handle.take_message(sub.msg_type, False)
             if result is not None:
-                msg, info = result
+                info = result[1]
                 self.assertNotEqual(0, info['source_timestamp'])
                 return
             else:

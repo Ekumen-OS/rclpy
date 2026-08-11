@@ -18,6 +18,7 @@ from rclpy import type_support
 from rclpy.exceptions import NoTypeSupportImportedException
 
 from test_msgs.msg import Strings
+from test_msgs.msg.experimental import Strings as ExperimentalStrings
 from test_msgs.srv import Empty
 
 
@@ -46,6 +47,12 @@ def test_check_valid_msg_type():
     type_support.check_is_valid_msg_type(Strings)
     with pytest.raises(RuntimeError):
         type_support.check_is_valid_msg_type(Empty)
+
+
+def test_check_valid_experimental_msg_type():
+    # Experimental message classes are dataclasses without the legacy
+    # conversion capsules; check_is_valid_msg_type must accept them.
+    type_support.check_is_valid_msg_type(ExperimentalStrings)
 
 
 def test_check_valid_srv_type():

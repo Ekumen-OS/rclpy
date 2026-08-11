@@ -58,14 +58,18 @@ get_c_vector_string(const std::vector<std::string> & strings_in)
 
 Subscription::Subscription(
   Node & node, py::object pymsg_type, std::string topic,
-  py::object pyqos_profile, py::object content_filter_options)
-: node_(node)
+  py::object pyqos_profile, py::object content_filter_options,
+  py::object pyconstraints)
+: node_(node),
+  type_support_(nullptr),
+  is_cpython_(false)
 {
   auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type));
+    common_get_type_support(pymsg_type, &is_cpython_));
   if (!msg_type) {
     throw py::error_already_set();
   }
+  type_support_ = msg_type;
 
   rcl_subscription_options_t subscription_ops = rcl_subscription_get_default_options();
 
@@ -110,9 +114,20 @@ Subscription::Subscription(
     }
   }
 
-  rcl_ret_t ret = rcl_subscription_init(
-    rcl_subscription_.get(), node_.rcl_ptr(), msg_type,
-    topic.c_str(), &subscription_ops);
+  rcl_ret_t ret;
+  if (pyconstraints.is_none()) {
+    ret = rcl_subscription_init(
+      rcl_subscription_.get(), node_.rcl_ptr(), msg_type,
+      topic.c_str(), &subscription_ops);
+  } else {
+    // The constraints struct is only valid for the duration of this call: the
+    // rmw layer clones the constraints into owned storage during init.
+    rosidl_message_type_constraints_t constraints =
+      message_constraints_from_py(pyconstraints);
+    ret = rcl_subscription_init_with_constraints(
+      rcl_subscription_.get(), node_.rcl_ptr(), msg_type, &constraints,
+      topic.c_str(), &subscription_ops);
+  }
   if (ret != RCL_RET_OK) {
     if (ret == RCL_RET_TOPIC_NAME_INVALID) {
       std::string error_text{"Failed to create subscription due to invalid topic name '"};
@@ -152,6 +167,24 @@ Subscription::take_message(py::object pymsg_type, bool raw)
     pytaken_msg = py::bytes(
       reinterpret_cast<const char *>(taken.rcl_msg.buffer),
       taken.rcl_msg.buffer_length);
+  } else if (is_cpython_) {
+    // CPython-typesupport messages ARE PyObject *: take directly into a
+    // Python message instance.  The rmw layer deserializes in place
+    // (deserialize_fields mutates the object's containers), so no
+    // convert_to_py is involved.
+    pytaken_msg = pymsg_type();
+    rcl_ret_t ret = rcl_take(
+      rcl_subscription_.get(), pytaken_msg.ptr(), &message_info, NULL);
+    if (RCL_RET_OK != ret) {
+      if (RCL_RET_BAD_ALLOC == ret) {
+        rcl_reset_error();
+        throw std::bad_alloc();
+      }
+      if (RCL_RET_SUBSCRIPTION_TAKE_FAILED == ret) {
+        return py::none();
+      }
+      throw RCLError("failed to take message from subscription");
+    }
   } else {
     auto taken_msg = create_from_py(pymsg_type);
 
@@ -184,6 +217,64 @@ Subscription::take_message(py::object pymsg_type, bool raw)
       "received_timestamp"_a = message_info.received_timestamp,
       "publication_sequence_number"_a = pub_seq_number,
       "reception_sequence_number"_a = rec_seq_number));
+}
+
+py::object
+Subscription::take_loaned_message(py::object pymsg_type)
+{
+  if (!is_cpython_) {
+    // Message loaning requires a CPython typesupport; report the take as
+    // failed (None) so callers can fall back to a regular take.
+    return py::none();
+  }
+  void * loaned = nullptr;
+  rmw_message_info_t message_info;
+  rcl_ret_t ret = rcl_take_loaned_message(
+    rcl_subscription_.get(), &loaned, &message_info, NULL);
+  if (RCL_RET_OK != ret) {
+    // Failing to take a loaned message does not raise: return None so the
+    // executor can fall back to a regular take.
+    rcl_reset_error();
+    return py::none();
+  }
+  py::object msg_obj =
+    py::reinterpret_steal<py::object>(static_cast<PyObject *>(loaned));
+  if (!py::isinstance(msg_obj, pymsg_type)) {
+    // The loaned sample is not a Python message view; return it and report
+    // the take as failed (no raise).
+    rcl_return_loaned_message_from_subscription(rcl_subscription_.get(), loaned);
+    rcl_reset_error();
+    return py::none();
+  }
+  // Like take_message(), return a (message, metadata) tuple; the message is a
+  // MessageLoan that the caller must return after use.
+  return py::make_tuple(
+    py::cast(MessageLoan(msg_obj)),
+    py::dict(
+      "source_timestamp"_a = message_info.source_timestamp,
+      "received_timestamp"_a = message_info.received_timestamp,
+      "publication_sequence_number"_a =
+      message_info.publication_sequence_number,
+      "reception_sequence_number"_a = message_info.reception_sequence_number));
+}
+
+void
+Subscription::return_loaned_message(MessageLoan & loan)
+{
+  if (!is_cpython_) {
+    throw py::type_error(
+      "loaned messages are only supported for CPython typesupport messages");
+  }
+  // Fetching the message is destructive: the loan is consumed by this call.
+  py::object message = loan.take_message();
+  if (message.is_none()) {
+    throw py::type_error("loaned message is not valid");
+  }
+  rcl_ret_t ret = rcl_return_loaned_message_from_subscription(
+    rcl_subscription_.get(), message.ptr());
+  if (RCL_RET_OK != ret) {
+    throw RCLError("Failed to return loaned message");
+  }
 }
 
 const char *
@@ -306,12 +397,14 @@ void
 define_subscription(py::object module)
 {
   py::class_<Subscription, Destroyable, std::shared_ptr<Subscription>>(module, "Subscription")
-  .def(py::init<Node &, py::object, std::string, py::object, py::object>(),
+  .def(
+    py::init<Node &, py::object, std::string, py::object, py::object, py::object>(),
     py::arg("node"),
     py::arg("msg_type"),
     py::arg("topic"),
     py::arg("qos_profile"),
-    py::arg("content_filter_options") = py::none())
+    py::arg("content_filter_options") = py::none(),
+    py::arg("constraints") = py::none())
   .def_property_readonly(
     "pointer", [](const Subscription & subscription) {
       return reinterpret_cast<size_t>(subscription.rcl_ptr());
@@ -320,6 +413,12 @@ define_subscription(py::object module)
   .def(
     "take_message", &Subscription::take_message,
     "Take a message and its metadata from a subscription")
+  .def(
+    "take_loaned_message", &Subscription::take_loaned_message,
+    "Take a loaned message and its metadata from a subscription")
+  .def(
+    "return_loaned_message", &Subscription::return_loaned_message,
+    "Return a previously taken loaned message to the middleware")
   .def(
     "get_logger_name", &Subscription::get_logger_name,
     "Get the name of the logger associated with the node of the subscription.")

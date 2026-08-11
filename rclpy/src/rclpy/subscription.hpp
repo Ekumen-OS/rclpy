@@ -19,12 +19,15 @@
 
 #include <rcl/subscription.h>
 
+#include <rosidl_runtime_c/message_type_support_struct.h>
+
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "destroyable.hpp"
+#include "loan.hpp"
 #include "node.hpp"
 
 namespace py = pybind11;
@@ -49,10 +52,13 @@ public:
    * \param[in] topic The topic name
    * \param[in] pyqos_profile rmw_qos_profile_t object for this subscription
    * \param[in] content_filter_options ContentFilterOptions object for this subscription
+   * \param[in] pyconstraints Optional message type constraints (a Python
+   *   Msg.Constraints instance) or None.
    */
   Subscription(
     Node & node, py::object pymsg_type, std::string topic,
-    py::object pyqos_profile, py::object content_filter_options = py::none());
+    py::object pyqos_profile, py::object content_filter_options = py::none(),
+    py::object pyconstraints = py::none());
 
   /// Take a message and its metadata from a subscription
   /**
@@ -67,6 +73,30 @@ public:
    */
   py::object
   take_message(py::object pymsg_type, bool raw);
+
+  /// Take a loaned message and its metadata from a subscription.
+  /**
+   * Attempts a loaned take (rcl_take_loaned_message).  On success returns a
+   * (MessageLoan, metadata) tuple, where the MessageLoan wraps the Python
+   * message view.  On failure (unsupported by the middleware, no data
+   * available, or the subscription's typesupport is not a CPython one)
+   * returns None without raising, so callers can fall back to a regular take.
+   *
+   * \param[in] pymsg_type Message type to be taken (i.e. a class).
+   * \return A (MessageLoan, metadata) tuple, or None if no loaned message
+   *   could be taken.
+   */
+  py::object
+  take_loaned_message(py::object pymsg_type);
+
+  /// Return a previously taken loaned message to the middleware.
+  /**
+   * Raises RCLError if the message cannot be returned.
+   *
+   * \param[in] loan The loaned message to return.
+   */
+  void
+  return_loaned_message(MessageLoan & loan);
 
   /// Get the name of the logger associated with the node of the subscription.
   /**
@@ -134,6 +164,10 @@ public:
 private:
   Node node_;
   std::shared_ptr<rcl_subscription_t> rcl_subscription_;
+  const rosidl_message_type_support_t * type_support_;
+  // True when the resolved type support is the CPython dispatch: message
+  // payloads are Python objects.
+  bool is_cpython_;
 };
 /// Define a pybind11 wrapper for an rclpy::Subscription
 void define_subscription(py::object module);

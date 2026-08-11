@@ -33,6 +33,8 @@
 
 #include <rcpputils/scope_exit.hpp>
 
+#include "rosidl_typesupport_cpython/message_type_support.hpp"
+
 #include "exceptions.hpp"
 #include "utils.hpp"
 
@@ -57,14 +59,86 @@ convert_to_py_names_and_types(const rcl_names_and_types_t * names_and_types)
 }
 
 void *
-common_get_type_support(py::object pymessage)
+common_get_type_support(py::object pymessage, bool * is_cpython)
 {
+  if (nullptr != is_cpython) {
+    *is_cpython = false;
+  }
+  // Try the CPython typesupport dispatch first.  If a CPython typesupport is
+  // available for the message class, its payloads are Python objects and are
+  // passed to rcl directly.  Otherwise fall back to the legacy _TYPE_SUPPORT
+  // capsule + convert functions.
+  const rosidl_message_type_support_t * handle = nullptr;
+  try {
+    handle = rosidl_typesupport_cpython::get_message_typesupport_handle(pymessage);
+  } catch (const py::error_already_set &) {
+    // The dispatch failed to resolve (e.g. no per-package dispatch library);
+    // clear the error and fall back to the legacy capsule path.
+    PyErr_Clear();
+    handle = nullptr;
+  }
+  if (handle) {
+    if (nullptr != is_cpython) {
+      *is_cpython = true;
+    }
+    return const_cast<rosidl_message_type_support_t *>(handle);
+  }
+
+  // The dispatch did not apply: clear any error it may have set so the
+  // fallback (and subsequent rcl calls) do not observe a stale error state.
+  rcutils_reset_error();
+
   py::object pymetaclass = pymessage.attr("__class__");
 
   py::object value = pymetaclass.attr("_TYPE_SUPPORT");
   auto capsule_ptr = static_cast<void *>(value.cast<py::capsule>());
 
   return capsule_ptr;
+}
+
+bool
+has_message_typesupport_handle(py::object pymsg_type)
+{
+  // Python-visible probe for a CPython typesupport handle: used by
+  // check_is_valid_msg_type to accept classes with a CPython typesupport and
+  // fall back to the legacy checks otherwise.
+  try {
+    return nullptr !=
+           rosidl_typesupport_cpython::get_message_typesupport_handle(pymsg_type);
+  } catch (const py::error_already_set &) {
+    PyErr_Clear();
+    return false;
+  }
+}
+
+rosidl_message_type_constraints_t
+message_constraints_from_py(py::object pyconstraints)
+{
+  rosidl_message_type_constraints_t constraints =
+    rosidl_get_zero_initialized_message_type_constraints();
+  if (pyconstraints.is_none()) {
+    return constraints;
+  }
+
+  // type_specific is the Python Msg.Constraints instance itself; the CPython
+  // typesupport's build_constrained / clone_constraints callbacks walk it via
+  // pybind11 (under the GIL).  The caller must keep pyconstraints alive for
+  // the duration of the rcl call (the rmw layer clones it into owned storage).
+  constraints.type_specific = pyconstraints.ptr();
+
+  // Optional blanket limits, mirroring the C++ MessageConstraints<T> struct.
+  if (py::hasattr(pyconstraints, "max_string_length")) {
+    constraints.max_string_length = py::cast<size_t>(
+      pyconstraints.attr("max_string_length"));
+  }
+  if (py::hasattr(pyconstraints, "max_total_size")) {
+    constraints.max_total_size = py::cast<size_t>(
+      pyconstraints.attr("max_total_size"));
+  }
+  if (py::hasattr(pyconstraints, "strict")) {
+    constraints.strict = py::cast<bool>(pyconstraints.attr("strict"));
+  }
+  return constraints;
 }
 
 std::unique_ptr<void, destroy_ros_message_function *>

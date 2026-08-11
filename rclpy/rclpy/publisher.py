@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+from typing import Optional
 from typing import TypeVar, Union
 
 from rclpy.callback_groups import CallbackGroup
@@ -22,6 +24,43 @@ from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import QoSProfile
 
 MsgType = TypeVar('MsgType')
+
+
+class PublishableMessageLender:
+    """
+    A context manager that lends a message from the middleware.
+
+    ``PublishableMessageLender`` is returned by
+    :meth:`.Publisher.borrow_loaned_message`.  Entering the context manager
+    borrows a :class:`MessageLoan` from the middleware; the loan is returned on
+    exit unless it was already published with
+    :meth:`.Publisher.publish_loaned_message`.
+
+    .. warning:: Users should not create a ``PublishableMessageLender`` with
+       this constructor; use :meth:`.Publisher.borrow_loaned_message` instead.
+    """
+
+    def __init__(
+        self,
+        publisher_impl: _rclpy.Publisher,
+        constraints: Optional[Any] = None,
+    ) -> None:
+        self._publisher_impl = publisher_impl
+        self._constraints = constraints
+        self._loan = None
+
+    def __enter__(self) -> _rclpy.MessageLoan:
+        self._loan = self._publisher_impl.borrow_loaned_message(self._constraints)
+        return self._loan
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        # Return the loan on context exit unless it was already published
+        # inside the block (publish invalidates the loan).  This never leaks.
+        if self._loan is not None and self._loan.valid:
+            with self._publisher_impl:
+                self._publisher_impl.return_loaned_message(self._loan)
+        self._loan = None
+        return False
 
 
 class Publisher:
@@ -72,6 +111,33 @@ class Publisher:
                 self.__publisher.publish_raw(msg)
             else:
                 raise TypeError('Expected {}, got {}'.format(self.msg_type, type(msg)))
+
+    def publish_loaned_message(self, loan) -> None:
+        """
+        Publish a loaned message and transfer ownership to the middleware.
+
+        :param loan: The :class:`MessageLoan` to publish.
+        """
+        with self.handle:
+            self.__publisher.publish_loaned_message(loan)
+
+    def borrow_loaned_message(
+        self,
+        constraints: Optional[Any] = None,
+    ) -> PublishableMessageLender:
+        """
+        Borrow a message from the middleware.
+
+        The message is allocated in memory owned by the middleware (zero-copy).
+        Enter the returned context manager to borrow the message; the loan is
+        returned on exit unless it was published.
+
+        :param constraints: Optional per-loan message constraints
+            (a ``msg_type.Constraints`` instance).  Must not be looser than the
+            publisher-wide constraints set at creation time.
+        :return: A :class:`PublishableMessageLender` context manager.
+        """
+        return PublishableMessageLender(self.__publisher, constraints)
 
     def get_subscription_count(self) -> int:
         """Get the amount of subscribers that this publisher has."""
