@@ -142,6 +142,19 @@ class Subscription:
         """
         return SubscribedMessageLender(self.handle, self.msg_type)
 
+    def can_loan_messages(self) -> bool:
+        """
+        Check whether this subscription can take loaned messages.
+
+        Mirrors ``rcl_subscription_can_loan_messages``: false when loaned
+        messages are disabled (``ROS_DISABLE_LOANED_MESSAGES``) or the
+        middleware does not support them for this subscription.
+
+        :return: ``True`` if loaned takes are supported and enabled.
+        """
+        with self.handle:
+            return self.__subscription.can_loan_messages()
+
     def destroy(self):
         """
         Destroy a container for a ROS subscription.

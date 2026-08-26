@@ -277,6 +277,12 @@ Subscription::return_loaned_message(MessageLoan & loan)
   }
 }
 
+bool
+Subscription::can_loan_messages() const
+{
+  return rcl_subscription_can_loan_messages(rcl_subscription_.get());
+}
+
 const char *
 Subscription::get_logger_name() const
 {
@@ -416,6 +422,9 @@ define_subscription(py::object module)
   .def(
     "take_loaned_message", &Subscription::take_loaned_message,
     "Take a loaned message and its metadata from a subscription")
+  .def(
+    "can_loan_messages", &Subscription::can_loan_messages,
+    "Check whether this subscription can take loaned messages")
   .def(
     "return_loaned_message", &Subscription::return_loaned_message,
     "Return a previously taken loaned message to the middleware")

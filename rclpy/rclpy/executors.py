@@ -467,29 +467,30 @@ class Executor(ContextManager['Executor']):
     def _take_subscription(self, sub):
         try:
             with sub.handle:
-                # Attempt a loaned take first; on failure (unsupported, no
-                # data, or not a CPython typesupport) the lender yields None
-                # and we fall back to a regular take.
-                with ExitStack() as stack:
-                    loan_info = stack.enter_context(sub.take_loaned_message())
-                    if loan_info is not None:
-                        loan, msg_info = loan_info
-                        # Transfer the lender (which returns the loan on exit)
-                        # to a stack owned by the callback execution below.
-                        callback_stack = stack.pop_all()
-                        if sub._callback_type is Subscription.CallbackType.MessageOnly:
-                            msg_tuple = (loan, )
-                        else:
-                            msg_tuple = (loan, msg_info)
+                # Attempt a loaned take first when the subscription supports
+                # it; on failure (no data, or not a CPython typesupport) the
+                # lender yields None and we fall back to a regular take.
+                if sub.can_loan_messages():
+                    with ExitStack() as stack:
+                        loan_info = stack.enter_context(sub.take_loaned_message())
+                        if loan_info is not None:
+                            loan, msg_info = loan_info
+                            # Transfer the lender (which returns the loan on exit)
+                            # to a stack owned by the callback execution below.
+                            callback_stack = stack.pop_all()
+                            if sub._callback_type is Subscription.CallbackType.MessageOnly:
+                                msg_tuple = (loan, )
+                            else:
+                                msg_tuple = (loan, msg_info)
 
-                        async def _execute():
-                            with callback_stack:
-                                await await_or_execute(sub.callback, *msg_tuple)
+                            async def _execute():
+                                with callback_stack:
+                                    await await_or_execute(sub.callback, *msg_tuple)
 
-                        return _execute
+                            return _execute
 
-                # Loaned take failed (the lender's exit was a no-op): fall back
-                # to the regular copy take.
+                # Loaned take failed (the lender's exit was a no-op) or loans
+                # are not supported: fall back to the regular copy take.
                 msg_info = sub.handle.take_message(sub.msg_type, sub.raw)
                 if msg_info is None:
                     return None

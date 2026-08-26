@@ -89,6 +89,17 @@ public:
   py::object
   take_loaned_message(py::object pymsg_type);
 
+  /// Check whether this subscription can take loaned messages.
+  /**
+   * Mirrors rcl_subscription_can_loan_messages(): false when loaned messages
+   * are disabled (ROS_DISABLE_LOANED_MESSAGES) or the middleware does not
+   * support them for this subscription.
+   *
+   * \return True if loaned takes are supported and enabled.
+   */
+  bool
+  can_loan_messages() const;
+
   /// Return a previously taken loaned message to the middleware.
   /**
    * Raises RCLError if the message cannot be returned.
