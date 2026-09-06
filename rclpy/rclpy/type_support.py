@@ -56,21 +56,30 @@ def check_are_valid_constraints(msg_type, constraints):
     """
     Validate a constraints argument against its message type.
 
-    Constraints are only supported for experimental message types, which carry
-    a generated ``Constraints`` inner class.  This raises early with a clear
-    error instead of failing deep inside the middleware.
+    Constraints are a ``rosidl_runtime_cpython.constraints.MessageConstraints``
+    instance: blanket limits plus an optional ``type_specific``
+    per-message ``Msg.Constraints`` instance.  This raises early with a
+    clear error instead of failing deep inside the middleware.
     """
     if constraints is None:
+        return
+    from rosidl_runtime_cpython.constraints import MessageConstraints
+    if not isinstance(constraints, MessageConstraints):
+        raise TypeError(
+            f'Expected constraints of type MessageConstraints, '
+            f'got {type(constraints).__name__}.')
+    type_specific = constraints.type_specific
+    if type_specific is None:
         return
     constraints_type = getattr(msg_type, 'Constraints', None)
     if constraints_type is None:
         raise TypeError(
             f'Constraints are only supported for experimental message types; '
             f'{msg_type} has no Constraints class.')
-    if not isinstance(constraints, constraints_type):
+    if not isinstance(type_specific, constraints_type):
         raise TypeError(
-            f'Expected constraints of type {msg_type.__name__}.Constraints, '
-            f'got {type(constraints).__name__}.')
+            f'Expected type_specific of type {msg_type.__name__}.Constraints, '
+            f'got {type(type_specific).__name__}.')
 
 
 def check_is_valid_srv_type(srv_type):

@@ -85,17 +85,18 @@ has_message_typesupport_handle(py::object pymsg_type);
 
 /// Build a rosidl_message_type_constraints_t from a Python constraints object.
 /**
- * For experimental messages (bridge != nullptr), ``type_specific`` is the
- * unwrapped C++ ``Msg::Constraints *`` obtained through the bridge.  Blanket
- * limits are read from the optional ``max_string_length`` / ``max_total_size``
- * / ``strict`` attributes when present, otherwise they default to 0 / 0 /
- * false.
+ * \p pyconstraints is a
+ * ``rosidl_runtime_cpython.constraints.MessageConstraints`` instance:
+ * blanket limits are read from its ``max_string_length`` /
+ * ``max_total_size`` / ``strict`` attributes, and ``type_specific`` (a
+ * per-message ``Msg.Constraints`` instance, or None) is unwrapped to the
+ * C++ ``Msg::Constraints *`` through the bridge (experimental messages).
  *
  * The returned struct is only valid while \p pyconstraints is alive; the rmw
  * layer clones the constraints into owned storage during init/borrow.
  *
- * \param[in] pyconstraints A Python constraints object (Msg.Constraints
- *   instance), or None for no constraints.
+ * \param[in] pyconstraints A MessageConstraints instance,
+ *   or None for no constraints.
  * \param[in] bridge The message's MessageTypeBridge (may be nullptr).
  * \return The C constraints struct (zero-initialized when pyconstraints is None).
  */

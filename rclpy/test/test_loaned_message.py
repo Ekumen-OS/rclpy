@@ -32,6 +32,7 @@ import pytest  # noqa: E402
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
 
+from rosidl_runtime_cpython.constraints import MessageConstraints  # noqa: E402
 from rosidl_runtime_cpython.constraints import StringConstraint  # noqa: E402
 
 from test_msgs.msg import Strings as StdStrings  # noqa: E402
@@ -74,9 +75,9 @@ def _spin_until(node, predicate, timeout=4.0):
 
 
 def _strings_constraints(size=100):
-    constraints = Strings.Constraints()
-    constraints.string_value = StringConstraint(size=size)
-    return constraints
+    type_specific = Strings.Constraints()
+    type_specific.string_value = StringConstraint(size=size)
+    return MessageConstraints(type_specific=type_specific)
 
 
 def test_constrained_publisher_and_subscription_creation(node):
@@ -89,6 +90,21 @@ def test_constrained_publisher_and_subscription_creation(node):
 def test_invalid_constraints_type_raises(node):
     with pytest.raises(TypeError):
         node.create_publisher(Strings, _unique_topic(), 10, constraints='not constraints')
+
+
+def test_blanket_only_constraints_creation(node):
+    pub = node.create_publisher(
+        Strings, _unique_topic(), 10,
+        constraints=MessageConstraints(max_string_length=200))
+    assert pub is not None
+
+
+def test_mismatched_type_specific_raises(node):
+    with pytest.raises(TypeError):
+        node.create_publisher(
+            Strings, _unique_topic(), 10,
+            constraints=MessageConstraints(
+                type_specific=WStrings.Constraints()))
 
 
 def test_constraints_rejected_for_standard_messages(node):
@@ -182,12 +198,13 @@ def test_constraint_violation_on_borrowed_message(node):
 
 
 def test_loaned_wstring_array_roundtrip(node):
-    constraints = WStrings.Constraints()
-    constraints.wstring_value = StringConstraint(size=100)
-    constraints.wstring_value_default1 = StringConstraint(size=100)
-    constraints.wstring_value_default2 = StringConstraint(size=100)
-    constraints.wstring_value_default3 = StringConstraint(size=100)
-    constraints.array_of_wstrings = StringConstraint(size=50)
+    type_specific = WStrings.Constraints()
+    type_specific.wstring_value = StringConstraint(size=100)
+    type_specific.wstring_value_default1 = StringConstraint(size=100)
+    type_specific.wstring_value_default2 = StringConstraint(size=100)
+    type_specific.wstring_value_default3 = StringConstraint(size=100)
+    type_specific.array_of_wstrings = StringConstraint(size=50)
+    constraints = MessageConstraints(type_specific=type_specific)
     received = []
     topic = _unique_topic()
     pub = node.create_publisher(WStrings, topic, 10, constraints=constraints)

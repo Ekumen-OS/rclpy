@@ -133,8 +133,9 @@ class Publisher:
         returned on exit unless it was published.
 
         :param constraints: Optional per-loan message constraints
-            (a ``msg_type.Constraints`` instance).  Must not be looser than the
-            publisher-wide constraints set at creation time.
+            (a ``rosidl_runtime_cpython.constraints.MessageConstraints``
+            instance).  Must not be looser than the publisher-wide
+            constraints set at creation time.
         :return: A :class:`PublishableMessageLender` context manager.
         """
         return PublishableMessageLender(self.__publisher, constraints)

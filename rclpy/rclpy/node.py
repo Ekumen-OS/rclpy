@@ -1532,8 +1532,9 @@ class Node:
             If ``None``, then the default callback group for the node is used.
         :param event_callbacks: User-defined callbacks for middleware events.
         :param constraints: Optional message type constraints
-            (a ``msg_type.Constraints`` instance) bounding variable-length
-            members.  Only supported for experimental message types.
+            (a ``rosidl_runtime_cpython.constraints.MessageConstraints``
+            instance) bounding variable-length members.  Only supported
+            for experimental message types.
         :return: The new publisher.
         """
         qos_profile = self._validate_qos_or_depth_parameter(qos_profile)
@@ -1619,8 +1620,9 @@ class Node:
             representation.
         :param content_filter_options: The filter expression and parameters for content filtering.
         :param constraints: Optional message type constraints
-            (a ``msg_type.Constraints`` instance) bounding variable-length
-            members.  Only supported for experimental message types.
+            (a ``rosidl_runtime_cpython.constraints.MessageConstraints``
+            instance) bounding variable-length members.  Only supported
+            for experimental message types.
         """
         qos_profile = self._validate_qos_or_depth_parameter(qos_profile)
 

@@ -116,25 +116,24 @@ build_constraints(
     return constraints;
   }
 
-  // type_specific is the unwrapped C++ Msg::Constraints pointer (experimental
-  // messages) obtained through the bridge.  The caller must keep pyconstraints
-  // alive for the duration of the rcl call (the rmw layer clones it into owned
-  // storage).
-  if (bridge) {
-    constraints.type_specific = bridge->unwrap_cpp_constraints(pyconstraints.ptr());
-  }
+  // pyconstraints is a rosidl_runtime_cpython.constraints.MessageConstraints:
+  // blanket limits are read as typed attributes (no duck-typing), and
+  // type_specific is the per-message Msg::Constraints instance unwrapped to
+  // the C++ Msg::Constraints pointer through the bridge.  The caller must
+  // keep pyconstraints alive for the duration of the rcl call (the rmw layer
+  // clones it into owned storage).
+  constraints.max_string_length = py::cast<size_t>(
+    pyconstraints.attr("max_string_length"));
+  constraints.max_total_size = py::cast<size_t>(
+    pyconstraints.attr("max_total_size"));
+  constraints.strict = py::cast<bool>(pyconstraints.attr("strict"));
 
-  // Optional blanket limits, mirroring the C++ MessageConstraints<T> struct.
-  if (py::hasattr(pyconstraints, "max_string_length")) {
-    constraints.max_string_length = py::cast<size_t>(
-      pyconstraints.attr("max_string_length"));
-  }
-  if (py::hasattr(pyconstraints, "max_total_size")) {
-    constraints.max_total_size = py::cast<size_t>(
-      pyconstraints.attr("max_total_size"));
-  }
-  if (py::hasattr(pyconstraints, "strict")) {
-    constraints.strict = py::cast<bool>(pyconstraints.attr("strict"));
+  if (bridge) {
+    py::object type_specific = pyconstraints.attr("type_specific");
+    if (!type_specific.is_none()) {
+      constraints.type_specific =
+        bridge->unwrap_cpp_constraints(type_specific.ptr());
+    }
   }
   return constraints;
 }

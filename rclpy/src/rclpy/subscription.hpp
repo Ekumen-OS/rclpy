@@ -53,8 +53,8 @@ public:
    * \param[in] topic The topic name
    * \param[in] pyqos_profile rmw_qos_profile_t object for this subscription
    * \param[in] content_filter_options ContentFilterOptions object for this subscription
-   * \param[in] pyconstraints Optional message type constraints (a Python
-   *   Msg.Constraints instance) or None.
+   * \param[in] pyconstraints Optional message type constraints (a
+   *   rosidl_runtime_cpython.constraints.MessageConstraints instance) or None.
    */
   Subscription(
     Node & node, py::object pymsg_type, std::string topic,
