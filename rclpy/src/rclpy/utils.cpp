@@ -33,13 +33,32 @@
 
 #include <rcpputils/scope_exit.hpp>
 
-#include "rosidl_typesupport_cpython/message_type_support.hpp"
+#include "rosidl_runtime_cpython/message_handle.hpp"
 
 #include "exceptions.hpp"
 #include "utils.hpp"
 
 namespace rclpy
 {
+
+const rosidl_runtime_cpython::MessageTypeBridge *
+get_type_bridge(py::object pymsg)
+{
+  // The bridge address is exposed as the read-only class attribute
+  // __cpython_bridge__ (a static const uintptr_t on the handle class).
+  // Attribute lookup on an instance finds the class attribute, so this works
+  // for both classes and instances.
+  try {
+    if (py::hasattr(pymsg, "__cpython_bridge__")) {
+      return reinterpret_cast<const rosidl_runtime_cpython::MessageTypeBridge *>(
+        py::cast<uintptr_t>(pymsg.attr("__cpython_bridge__")));
+    }
+  } catch (const py::error_already_set &) {
+    // Not a bridged message class; clear the error and report no bridge.
+    PyErr_Clear();
+  }
+  return nullptr;
+}
 
 py::list
 convert_to_py_names_and_types(const rcl_names_and_types_t * names_and_types)
@@ -59,35 +78,16 @@ convert_to_py_names_and_types(const rcl_names_and_types_t * names_and_types)
 }
 
 void *
-common_get_type_support(py::object pymessage, bool * is_cpython)
+common_get_type_support(py::object pymessage)
 {
-  if (nullptr != is_cpython) {
-    *is_cpython = false;
-  }
-  // Try the CPython typesupport dispatch first.  If a CPython typesupport is
-  // available for the message class, its payloads are Python objects and are
-  // passed to rcl directly.  Otherwise fall back to the legacy _TYPE_SUPPORT
-  // capsule + convert functions.
-  const rosidl_message_type_support_t * handle = nullptr;
-  try {
-    handle = rosidl_typesupport_cpython::get_message_typesupport_handle(pymessage);
-  } catch (const py::error_already_set &) {
-    // The dispatch failed to resolve (e.g. no per-package dispatch library);
-    // clear the error and fall back to the legacy capsule path.
-    PyErr_Clear();
-    handle = nullptr;
-  }
-  if (handle) {
-    if (nullptr != is_cpython) {
-      *is_cpython = true;
-    }
-    return const_cast<rosidl_message_type_support_t *>(handle);
+  // 1. MessageTypeBridge (experimental messages): the C++ typesupport handle
+  // is fetched through the bridge; message payloads are C++ message pointers.
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymessage);
+  if (bridge) {
+    return const_cast<rosidl_message_type_support_t *>(bridge->get_cpp_typesupport());
   }
 
-  // The dispatch did not apply: clear any error it may have set so the
-  // fallback (and subsequent rcl calls) do not observe a stale error state.
-  rcutils_reset_error();
-
+  // 2. Legacy _TYPE_SUPPORT capsule (standard messages).
   py::object pymetaclass = pymessage.attr("__class__");
 
   py::object value = pymetaclass.attr("_TYPE_SUPPORT");
@@ -99,20 +99,16 @@ common_get_type_support(py::object pymessage, bool * is_cpython)
 bool
 has_message_typesupport_handle(py::object pymsg_type)
 {
-  // Python-visible probe for a CPython typesupport handle: used by
-  // check_is_valid_msg_type to accept classes with a CPython typesupport and
-  // fall back to the legacy checks otherwise.
-  try {
-    return nullptr !=
-           rosidl_typesupport_cpython::get_message_typesupport_handle(pymsg_type);
-  } catch (const py::error_already_set &) {
-    PyErr_Clear();
-    return false;
-  }
+  // Python-visible probe for a MessageTypeBridge: used by
+  // check_is_valid_msg_type to accept experimental classes and fall back to
+  // the legacy checks otherwise.
+  return nullptr != get_type_bridge(pymsg_type);
 }
 
 rosidl_message_type_constraints_t
-message_constraints_from_py(py::object pyconstraints)
+build_constraints(
+  py::object pyconstraints,
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge)
 {
   rosidl_message_type_constraints_t constraints =
     rosidl_get_zero_initialized_message_type_constraints();
@@ -120,11 +116,13 @@ message_constraints_from_py(py::object pyconstraints)
     return constraints;
   }
 
-  // type_specific is the Python Msg.Constraints instance itself; the CPython
-  // typesupport's build_constrained / clone_constraints callbacks walk it via
-  // pybind11 (under the GIL).  The caller must keep pyconstraints alive for
-  // the duration of the rcl call (the rmw layer clones it into owned storage).
-  constraints.type_specific = pyconstraints.ptr();
+  // type_specific is the unwrapped C++ Msg::Constraints pointer (experimental
+  // messages) obtained through the bridge.  The caller must keep pyconstraints
+  // alive for the duration of the rcl call (the rmw layer clones it into owned
+  // storage).
+  if (bridge) {
+    constraints.type_specific = bridge->unwrap_cpp_constraints(pyconstraints.ptr());
+  }
 
   // Optional blanket limits, mirroring the C++ MessageConstraints<T> struct.
   if (py::hasattr(pyconstraints, "max_string_length")) {

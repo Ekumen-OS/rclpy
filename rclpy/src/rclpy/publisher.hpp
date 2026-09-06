@@ -179,9 +179,6 @@ private:
   py::object pymsg_type_;
   std::shared_ptr<rcl_publisher_t> rcl_publisher_;
   const rosidl_message_type_support_t * type_support_;
-  // True when the resolved type support is the CPython dispatch: message
-  // payloads are Python objects and can be passed to rcl directly.
-  bool is_cpython_;
 };
 /// Define a pybind11 wrapper for an rclpy::Publisher
 void define_publisher(py::object module);

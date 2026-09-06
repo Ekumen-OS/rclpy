@@ -22,6 +22,8 @@
 #include <rmw/serialized_message.h>
 #include <rosidl_runtime_c/message_type_support_struct.h>
 
+#include <memory>
+
 #include "exceptions.hpp"
 #include "serialization.hpp"
 #include "utils.hpp"
@@ -60,16 +62,26 @@ serialize(py::object pymsg, py::object pymsg_type)
     throw py::error_already_set();
   }
 
-  auto ros_msg = convert_from_py(pymsg);
-  if (!ros_msg) {
-    throw py::error_already_set();
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg);
+  void * ros_msg = nullptr;
+  std::unique_ptr<void, destroy_ros_message_function *> owned_msg(nullptr, nullptr);
+  if (bridge) {
+    // Experimental message: unwrap to the C++ message pointer (no ownership
+    // transfer; the Python handle retains ownership).
+    ros_msg = bridge->unwrap_cpp_message(pymsg.ptr());
+  } else {
+    owned_msg = convert_from_py(pymsg);
+    if (!owned_msg) {
+      throw py::error_already_set();
+    }
+    ros_msg = owned_msg.get();
   }
 
   // Create a serialized message object
   SerializedMessage serialized_msg(rcutils_get_default_allocator());
 
   // Serialize
-  rmw_ret_t rmw_ret = rmw_serialize(ros_msg.get(), ts, &serialized_msg.rcl_msg);
+  rmw_ret_t rmw_ret = rmw_serialize(ros_msg, ts, &serialized_msg.rcl_msg);
   if (RMW_RET_OK != rmw_ret) {
     throw RMWError("Failed to serialize ROS message");
   }
@@ -105,18 +117,33 @@ deserialize(py::bytes pybuffer, py::object pymsg_type)
   serialized_msg.buffer_length = length;
   serialized_msg.buffer = reinterpret_cast<uint8_t *>(serialized_buffer);
 
-  auto deserialized_ros_msg = create_from_py(pymsg_type);
-  if (!deserialized_ros_msg) {
-    throw py::error_already_set();
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type);
+  py::object deserialized_msg;
+  void * ros_msg = nullptr;
+  std::unique_ptr<void, destroy_ros_message_function *> owned_msg(nullptr, nullptr);
+  if (bridge) {
+    // Experimental message: create an owning Python handle and deserialize
+    // into its C++ message.
+    deserialized_msg = pymsg_type();
+    ros_msg = bridge->unwrap_cpp_message(deserialized_msg.ptr());
+  } else {
+    owned_msg = create_from_py(pymsg_type);
+    if (!owned_msg) {
+      throw py::error_already_set();
+    }
+    ros_msg = owned_msg.get();
   }
 
   // Deserialize
-  rmw_ret_t rmw_ret = rmw_deserialize(&serialized_msg, ts, deserialized_ros_msg.get());
+  rmw_ret_t rmw_ret = rmw_deserialize(&serialized_msg, ts, ros_msg);
 
   if (RMW_RET_OK != rmw_ret) {
     throw RMWError("failed to deserialize ROS message");
   }
 
-  return convert_to_py(deserialized_ros_msg.get(), pymsg_type);
+  if (bridge) {
+    return deserialized_msg;
+  }
+  return convert_to_py(owned_msg.get(), pymsg_type);
 }
 }  // namespace rclpy

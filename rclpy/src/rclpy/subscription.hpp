@@ -19,12 +19,13 @@
 
 #include <rcl/subscription.h>
 
-#include <rosidl_runtime_c/message_type_support_struct.h>
-
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <rosidl_runtime_c/message_type_support_struct.h>
+#include <rosidl_runtime_cpython/bridge.hpp>
 
 #include "destroyable.hpp"
 #include "loan.hpp"
@@ -176,9 +177,9 @@ private:
   Node node_;
   std::shared_ptr<rcl_subscription_t> rcl_subscription_;
   const rosidl_message_type_support_t * type_support_;
-  // True when the resolved type support is the CPython dispatch: message
-  // payloads are Python objects.
-  bool is_cpython_;
+  // Per-message-type bridge to the C++ typesupport (nullptr for standard
+  // messages).  Used by the loan paths.
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge_;
 };
 /// Define a pybind11 wrapper for an rclpy::Subscription
 void define_subscription(py::object module);

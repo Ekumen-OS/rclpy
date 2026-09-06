@@ -62,10 +62,10 @@ Subscription::Subscription(
   py::object pyconstraints)
 : node_(node),
   type_support_(nullptr),
-  is_cpython_(false)
+  bridge_(get_type_bridge(pymsg_type))
 {
   auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type, &is_cpython_));
+    common_get_type_support(pymsg_type));
   if (!msg_type) {
     throw py::error_already_set();
   }
@@ -123,7 +123,7 @@ Subscription::Subscription(
     // The constraints struct is only valid for the duration of this call: the
     // rmw layer clones the constraints into owned storage during init.
     rosidl_message_type_constraints_t constraints =
-      message_constraints_from_py(pyconstraints);
+      build_constraints(pyconstraints, get_type_bridge(pymsg_type));
     ret = rcl_subscription_init_with_constraints(
       rcl_subscription_.get(), node_.rcl_ptr(), msg_type, &constraints,
       topic.c_str(), &subscription_ops);
@@ -150,6 +150,7 @@ Subscription::take_message(py::object pymsg_type, bool raw)
 {
   py::object pytaken_msg;
   rmw_message_info_t message_info;
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type);
   if (raw) {
     SerializedMessage taken{rcutils_get_default_allocator()};
     rcl_ret_t ret = rcl_take_serialized_message(
@@ -167,14 +168,14 @@ Subscription::take_message(py::object pymsg_type, bool raw)
     pytaken_msg = py::bytes(
       reinterpret_cast<const char *>(taken.rcl_msg.buffer),
       taken.rcl_msg.buffer_length);
-  } else if (is_cpython_) {
-    // CPython-typesupport messages ARE PyObject *: take directly into a
-    // Python message instance.  The rmw layer deserializes in place
-    // (deserialize_fields mutates the object's containers), so no
-    // convert_to_py is involved.
+  } else if (bridge) {
+    // Experimental message: create an owning Python handle, unwrap to the C++
+    // message pointer, and take directly into it.  The rmw layer deserializes
+    // in place into the C++ message; the Python handle owns it.
     pytaken_msg = pymsg_type();
+    void * cpp_msg = bridge->unwrap_cpp_message(pytaken_msg.ptr());
     rcl_ret_t ret = rcl_take(
-      rcl_subscription_.get(), pytaken_msg.ptr(), &message_info, NULL);
+      rcl_subscription_.get(), cpp_msg, &message_info, NULL);
     if (RCL_RET_OK != ret) {
       if (RCL_RET_BAD_ALLOC == ret) {
         rcl_reset_error();
@@ -222,9 +223,10 @@ Subscription::take_message(py::object pymsg_type, bool raw)
 py::object
 Subscription::take_loaned_message(py::object pymsg_type)
 {
-  if (!is_cpython_) {
-    // Message loaning requires a CPython typesupport; report the take as
-    // failed (None) so callers can fall back to a regular take.
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type);
+  if (!bridge) {
+    // Message loaning requires an experimental message type; report the take
+    // as failed (None) so callers can fall back to a regular take.
     return py::none();
   }
   void * loaned = nullptr;
@@ -237,8 +239,10 @@ Subscription::take_loaned_message(py::object pymsg_type)
     rcl_reset_error();
     return py::none();
   }
+  // wrap_cpp_message creates a NON-OWNING Python handle: the middleware owns
+  // the storage and frees it when the loan is returned.
   py::object msg_obj =
-    py::reinterpret_steal<py::object>(static_cast<PyObject *>(loaned));
+    py::reinterpret_steal<py::object>(bridge->wrap_cpp_message(loaned));
   if (!py::isinstance(msg_obj, pymsg_type)) {
     // The loaned sample is not a Python message view; return it and report
     // the take as failed (no raise).
@@ -261,17 +265,18 @@ Subscription::take_loaned_message(py::object pymsg_type)
 void
 Subscription::return_loaned_message(MessageLoan & loan)
 {
-  if (!is_cpython_) {
+  if (!bridge_) {
     throw py::type_error(
-      "loaned messages are only supported for CPython typesupport messages");
+      "loaned messages are only supported for experimental message types");
   }
   // Fetching the message is destructive: the loan is consumed by this call.
   py::object message = loan.take_message();
   if (message.is_none()) {
     throw py::type_error("loaned message is not valid");
   }
+  void * cpp_msg = bridge_->unwrap_cpp_message(message.ptr());
   rcl_ret_t ret = rcl_return_loaned_message_from_subscription(
-    rcl_subscription_.get(), message.ptr());
+    rcl_subscription_.get(), cpp_msg);
   if (RCL_RET_OK != ret) {
     throw RCLError("Failed to return loaned message");
   }

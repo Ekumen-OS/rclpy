@@ -33,9 +33,8 @@ def check_for_type_support(msg_or_srv_type):
 
 
 def check_is_valid_msg_type(msg_type):
-    # A CPython typesupport handle resolves message classes (experimental
-    # classes, and any standard class with a generated CPython typesupport);
-    # those carry no legacy conversion capsules.
+    # A MessageTypeBridge resolves experimental message classes; those carry
+    # no legacy conversion capsules.
     if _rclpy.get_message_typesupport_handle(msg_type):
         return
     check_for_type_support(msg_type)

@@ -34,11 +34,10 @@ Publisher::Publisher(
   py::object pyqos_profile, py::object pyconstraints)
 : node_(node),
   pymsg_type_(pymsg_type),
-  type_support_(nullptr),
-  is_cpython_(false)
+  type_support_(nullptr)
 {
   auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type, &is_cpython_));
+    common_get_type_support(pymsg_type));
   if (!msg_type) {
     throw py::error_already_set();
   }
@@ -78,7 +77,7 @@ Publisher::Publisher(
     // The constraints struct is only valid for the duration of this call: the
     // rmw layer clones the constraints into owned storage during init.
     rosidl_message_type_constraints_t constraints =
-      message_constraints_from_py(pyconstraints);
+      build_constraints(pyconstraints, get_type_bridge(pymsg_type));
     ret = rcl_publisher_init_with_constraints(
       rcl_publisher_.get(), node_.rcl_ptr(), msg_type, &constraints,
       topic.c_str(), &publisher_ops);
@@ -137,11 +136,12 @@ Publisher::get_topic_name()
 void
 Publisher::publish(py::object pymsg)
 {
-  if (is_cpython_) {
-    // CPython-typesupport messages ARE PyObject *: pass the Python object
-    // directly to rcl; the outer table (dispatched by rmw) serializes it.  No
-    // convert_from_py involved.
-    rcl_ret_t ret = rcl_publish(rcl_publisher_.get(), pymsg.ptr(), NULL);
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg);
+  if (bridge) {
+    // Experimental message: unwrap to the C++ message pointer (no ownership
+    // transfer) and pass it to rcl; the C++ typesupport serializes it.
+    void * cpp_msg = bridge->unwrap_cpp_message(pymsg.ptr());
+    rcl_ret_t ret = rcl_publish(rcl_publisher_.get(), cpp_msg, NULL);
     if (RCL_RET_OK != ret) {
       throw RCLError("Failed to publish");
     }
@@ -162,11 +162,12 @@ Publisher::publish(py::object pymsg)
 MessageLoan
 Publisher::borrow_loaned_message(py::object pyconstraints)
 {
-  if (!is_cpython_) {
-    // Message loaning requires a CPython typesupport: the loaned sample is a
-    // Python message view only for such typesupports.
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type_);
+  if (!bridge) {
+    // Message loaning requires an experimental message type: the loaned
+    // sample is a C++ message view only for bridged types.
     throw py::type_error(
-      "loaned messages are only supported for CPython typesupport messages");
+      "loaned messages are only supported for experimental message types");
   }
 
   void * message = nullptr;
@@ -178,7 +179,7 @@ Publisher::borrow_loaned_message(py::object pyconstraints)
     // Per-loan constraints are cloned into owned storage by the rmw layer, so
     // the struct only needs to be valid for the duration of this call.
     rosidl_message_type_constraints_t constraints =
-      message_constraints_from_py(pyconstraints);
+      build_constraints(pyconstraints, bridge);
     ret = rcl_borrow_loaned_message_with_constraints(
       rcl_publisher_.get(), type_support_, &constraints, &message);
   }
@@ -188,10 +189,10 @@ Publisher::borrow_loaned_message(py::object pyconstraints)
     throw RCLError("Failed to borrow loaned message");
   }
 
-  // construct_message_at returned a new reference to a Python message
-  // instance whose containers view the middleware-owned storage.
+  // wrap_cpp_message creates a NON-OWNING Python handle: the middleware owns
+  // the storage and frees it when the loan is returned.
   py::object msg_obj =
-    py::reinterpret_steal<py::object>(static_cast<PyObject *>(message));
+    py::reinterpret_steal<py::object>(bridge->wrap_cpp_message(message));
   if (!py::isinstance(msg_obj, pymsg_type_)) {
     rcl_return_loaned_message_from_publisher(rcl_publisher_.get(), message);
     rcl_reset_error();
@@ -205,17 +206,19 @@ Publisher::borrow_loaned_message(py::object pyconstraints)
 void
 Publisher::publish_loaned_message(MessageLoan & loan)
 {
-  if (!is_cpython_) {
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type_);
+  if (!bridge) {
     throw py::type_error(
-      "loaned messages are only supported for CPython typesupport messages");
+      "loaned messages are only supported for experimental message types");
   }
   // Fetching the message is destructive: the loan is consumed by this call.
   py::object message = loan.take_message();
   if (message.is_none()) {
     throw py::type_error("loaned message is not valid");
   }
+  void * cpp_msg = bridge->unwrap_cpp_message(message.ptr());
   rcl_ret_t ret = rcl_publish_loaned_message(
-    rcl_publisher_.get(), message.ptr(), NULL);
+    rcl_publisher_.get(), cpp_msg, NULL);
   if (RCL_RET_OK != ret) {
     throw RCLError("Failed to publish loaned message");
   }
@@ -224,17 +227,19 @@ Publisher::publish_loaned_message(MessageLoan & loan)
 void
 Publisher::return_loaned_message(MessageLoan & loan)
 {
-  if (!is_cpython_) {
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge = get_type_bridge(pymsg_type_);
+  if (!bridge) {
     throw py::type_error(
-      "loaned messages are only supported for CPython typesupport messages");
+      "loaned messages are only supported for experimental message types");
   }
   // Fetching the message is destructive: the loan is consumed by this call.
   py::object message = loan.take_message();
   if (message.is_none()) {
     throw py::type_error("loaned message is not valid");
   }
+  void * cpp_msg = bridge->unwrap_cpp_message(message.ptr());
   rcl_ret_t ret = rcl_return_loaned_message_from_publisher(
-    rcl_publisher_.get(), message.ptr());
+    rcl_publisher_.get(), cpp_msg);
   if (RCL_RET_OK != ret) {
     throw RCLError("Failed to return loaned message");
   }

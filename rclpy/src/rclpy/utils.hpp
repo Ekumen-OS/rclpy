@@ -22,9 +22,10 @@
 #include <rmw/topic_endpoint_info.h>
 #include <rmw/types.h>
 
-#include <rosidl_runtime_c/message_type_support_struct.h>
-
 #include <memory>
+
+#include <rosidl_runtime_c/message_type_support_struct.h>
+#include <rosidl_runtime_cpython/bridge.hpp>
 
 #include "publisher.hpp"
 
@@ -34,6 +35,18 @@ namespace rclpy
 {
 
 typedef void destroy_ros_message_function (void *);
+
+/// Get the per-message-type bridge to the C++ typesupport, if any.
+/**
+ * Extracts the bridge through the MessageHandleInterface base class.  Returns
+ * nullptr for message classes without a bridge (standard messages, test
+ * fixtures, non-message objects).
+ *
+ * \param[in] pymsg The Python message class or instance.
+ * \return The MessageTypeBridge, or nullptr.
+ */
+const rosidl_runtime_cpython::MessageTypeBridge *
+get_type_bridge(py::object pymsg);
 
 /// Convert a C rcl_names_and_types_t into a Python list.
 /**
@@ -47,51 +60,49 @@ convert_to_py_names_and_types(const rcl_names_and_types_t * topic_names_and_type
 /// Get the type support structure for a Python ROS message type.
 /**
  * Resolution order:
- *   1. CPython typesupport dispatch
- *      (``rosidl_typesupport_cpython::get_message_typesupport_handle``) —
- *      experimental message classes and any standard message with a generated
- *      CPython typesupport;
+ *   1. MessageTypeBridge (experimental messages) — the C++ typesupport
+ *      handle is fetched through the bridge;
  *   2. legacy ``_TYPE_SUPPORT`` capsule on the metaclass (standard messages).
  *
  * \param[in] pymessage The Python ROS message type (class or instance).
- * \param[out] is_cpython Set to true when the handle was resolved through the
- *   CPython typesupport dispatch (message payloads are Python objects); left
- *   untouched when nullptr.
  * \return The type support structure or NULL if an error occurred.
  */
 void *
-common_get_type_support(py::object pymessage, bool * is_cpython = nullptr);
+common_get_type_support(py::object pymessage);
 
-/// Python-visible probe: True when a CPython typesupport handle exists.
+/// Python-visible probe: True when a MessageTypeBridge exists.
 /**
- * Calls the CPython typesupport dispatch resolution
- * (``rosidl_typesupport_cpython::get_message_typesupport_handle``) and reports
- * whether a handle was found, clearing any pending Python error.  Used by
- * ``rclpy.type_support.check_is_valid_msg_type`` to accept classes with a
- * CPython typesupport and fall back to the legacy checks otherwise.
+ * Reports whether the message class carries a MessageTypeBridge (experimental
+ * messages), clearing any pending Python error.  Used by
+ * ``rclpy.type_support.check_is_valid_msg_type`` to accept experimental
+ * classes and fall back to the legacy checks otherwise.
  *
  * \param[in] pymsg_type The Python message class to probe.
- * \return True if a CPython typesupport handle exists for the class.
+ * \return True if a MessageTypeBridge exists for the class.
  */
 bool
 has_message_typesupport_handle(py::object pymsg_type);
 
 /// Build a rosidl_message_type_constraints_t from a Python constraints object.
 /**
- * The ``type_specific`` member is the Python object itself (the generated
- * ``Msg.Constraints`` instance).  Blanket limits are read from the optional
- * ``max_string_length`` / ``max_total_size`` / ``strict`` attributes when
- * present, otherwise they default to 0 / 0 / false.
+ * For experimental messages (bridge != nullptr), ``type_specific`` is the
+ * unwrapped C++ ``Msg::Constraints *`` obtained through the bridge.  Blanket
+ * limits are read from the optional ``max_string_length`` / ``max_total_size``
+ * / ``strict`` attributes when present, otherwise they default to 0 / 0 /
+ * false.
  *
  * The returned struct is only valid while \p pyconstraints is alive; the rmw
  * layer clones the constraints into owned storage during init/borrow.
  *
  * \param[in] pyconstraints A Python constraints object (Msg.Constraints
  *   instance), or None for no constraints.
+ * \param[in] bridge The message's MessageTypeBridge (may be nullptr).
  * \return The C constraints struct (zero-initialized when pyconstraints is None).
  */
 rosidl_message_type_constraints_t
-message_constraints_from_py(py::object pyconstraints);
+build_constraints(
+  py::object pyconstraints,
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge);
 
 /// Create the equivalent ROS message C type instance for a given Python type.
 /**
