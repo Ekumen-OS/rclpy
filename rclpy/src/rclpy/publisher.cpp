@@ -194,7 +194,8 @@ Publisher::borrow_loaned_message(py::object pyconstraints)
   py::object msg_obj =
     py::reinterpret_steal<py::object>(bridge->wrap_cpp_message(message));
   if (!py::isinstance(msg_obj, pymsg_type_)) {
-    rcl_return_loaned_message_from_publisher(rcl_publisher_.get(), message);
+    rcl_ret_t ret = rcl_return_loaned_message_from_publisher(rcl_publisher_.get(), message);
+    (void)ret;
     rcl_reset_error();
     throw py::type_error(
       "loaned message is not a Python message instance of the publisher's "

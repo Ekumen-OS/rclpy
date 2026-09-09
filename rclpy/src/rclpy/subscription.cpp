@@ -246,7 +246,8 @@ Subscription::take_loaned_message(py::object pymsg_type)
   if (!py::isinstance(msg_obj, pymsg_type)) {
     // The loaned sample is not a Python message view; return it and report
     // the take as failed (no raise).
-    rcl_return_loaned_message_from_subscription(rcl_subscription_.get(), loaned);
+    rcl_ret_t ret = rcl_return_loaned_message_from_subscription(rcl_subscription_.get(), loaned);
+    (void)ret;
     rcl_reset_error();
     return py::none();
   }
