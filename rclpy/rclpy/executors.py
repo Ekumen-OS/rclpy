@@ -676,7 +676,15 @@ class Executor(ContextManager['Executor']):
                            ) -> Optional[Callable[[], Coroutine[None, None, None]]]:
         try:
             with sub.handle:
-                msg_info = sub.handle.take_message(sub.msg_type, sub.raw)
+                loan = None
+                if sub.handle.is_region:
+                    loan_info = sub.handle.take_loaned_message()
+                    if loan_info is None:
+                        return None
+                    loan, info = loan_info
+                    msg_info = (loan.view, info)
+                else:
+                    msg_info = sub.handle.take_message(sub.msg_type, sub.raw)
                 if msg_info is None:
                     return None
 
@@ -687,7 +695,11 @@ class Executor(ContextManager['Executor']):
                     msg_tuple = msg_info
 
                 async def _execute() -> None:
-                    await await_or_execute(sub.callback, *msg_tuple)  # type: ignore [arg-type]
+                    try:
+                        await await_or_execute(sub.callback, *msg_tuple)  # type: ignore [arg-type]
+                    finally:
+                        if loan is not None and loan.valid:
+                            loan.return_loan()
 
                 return _execute
         except InvalidHandle:
@@ -796,15 +808,14 @@ class Executor(ContextManager['Executor']):
                 gc.trigger()
                 return
             with work_tracker.track_callback():
-                # The take_from_wait_list method here is expected to return either an async def
-                # method or None if there is no work to do.
-                call_coroutine = take_from_wait_list(entity)
-
-                # Signal that this has been 'taken' and can be added back to the wait list
-                entity._executor_event = False
-                gc.trigger()
-
                 try:
+                    try:
+                        # The take returns an async method or None when there is no work.
+                        call_coroutine = take_from_wait_list(entity)
+                    finally:
+                        # A failed take must also release the entity for subsequent work.
+                        entity._executor_event = False
+                        gc.trigger()
                     if call_coroutine is not None:
                         await call_coroutine()
                 finally:

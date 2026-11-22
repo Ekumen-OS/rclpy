@@ -33,6 +33,7 @@
   <build_depend>rmw_implementation</build_depend>
   <build_depend>rmw_implementation_cmake</build_depend>
   <build_depend>rosidl_runtime_c</build_depend>
+  <build_depend>rosidl_runtime_cpython</build_depend>
   <build_depend>type_description_interfaces</build_depend>
 
   <exec_depend>action_msgs</exec_depend>
@@ -54,6 +55,7 @@
   <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>rosidl_pycommon</exec_depend>
   <exec_depend>rosidl_runtime_c</exec_depend>
+  <exec_depend>rosidl_runtime_cpython</exec_depend>
   <exec_depend>rpyutils</exec_depend>
   <exec_depend>service_msgs</exec_depend>
   <exec_depend>type_description_interfaces</exec_depend>

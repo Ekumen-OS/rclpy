@@ -28,11 +28,30 @@
 
 #include "destroyable.hpp"
 #include "node.hpp"
+#include "rosidl_runtime_cpython/bridge.hpp"
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class SubscriptionLoan
+{
+public:
+  SubscriptionLoan(
+    std::shared_ptr<rcl_subscription_t> subscription, void * message,
+    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view);
+  ~SubscriptionLoan();
+  py::object view() const;
+  bool valid() const;
+  void return_loan();
+
+private:
+  std::shared_ptr<rcl_subscription_t> subscription_;
+  void * message_;
+  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state_;
+  py::object view_;
+};
+
 /// Create a subscription
 /**
  * This class will create a subscription for the given topic name.
@@ -55,7 +74,7 @@ public:
   Subscription(
     Node & node, py::object pymsg_type, std::string topic,
     py::object pyqos_profile, py::object content_filter_options = py::none(),
-    py::object acceptable_buffer_backends = py::none());
+    py::object acceptable_buffer_backends = py::none(), py::object constraints = py::none());
 
   /// Take a message and its metadata from a subscription
   /**
@@ -70,6 +89,10 @@ public:
    */
   py::object
   take_message(py::object pymsg_type, bool raw);
+
+  bool is_region() const {return bridge_ != nullptr;}
+
+  py::object take_loaned_message();
 
   /// Get the name of the logger associated with the node of the subscription.
   /**
@@ -154,6 +177,7 @@ private:
   Node node_;
   std::function<void(size_t)> on_new_message_callback_{nullptr};
   std::shared_ptr<rcl_subscription_t> rcl_subscription_;
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge_{nullptr};
 
   void
   set_callback(rcl_event_callback_t callback, const void * user_data);

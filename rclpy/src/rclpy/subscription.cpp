@@ -21,6 +21,8 @@
 #include <rcl/types.h>
 #include <rosidl_runtime_c/message_type_support_struct.h>
 #include <rmw/types.h>
+#include <rcutils/env.h>
+#include <rcutils/logging_macros.h>
 
 #include <cstddef>
 #include <memory>
@@ -59,17 +61,92 @@ get_c_vector_string(const std::vector<std::string> & strings_in)
 
   return cstrings;
 }
+
+py::dict
+message_info_to_py(const rmw_message_info_t & message_info)
+{
+  py::object pub_seq_number = py::none();
+  if (message_info.publication_sequence_number != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
+    pub_seq_number = py::int_(message_info.publication_sequence_number);
+  }
+  py::object rec_seq_number = py::none();
+  if (message_info.reception_sequence_number != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
+    rec_seq_number = py::int_(message_info.reception_sequence_number);
+  }
+  py::object publisher_gid = py::none();
+  if (message_info.publisher_gid.implementation_identifier != nullptr) {
+    publisher_gid = py::dict(
+      "implementation_identifier"_a = py::str(message_info.publisher_gid.implementation_identifier),
+      "data"_a = py::bytes(
+        reinterpret_cast<const char *>(message_info.publisher_gid.data), RMW_GID_STORAGE_SIZE));
+  }
+  return py::dict(
+    "source_timestamp"_a = message_info.source_timestamp,
+    "received_timestamp"_a = message_info.received_timestamp,
+    "publication_sequence_number"_a = pub_seq_number,
+    "reception_sequence_number"_a = rec_seq_number,
+    "publisher_gid"_a = publisher_gid);
+}
 }  // namespace
+
+SubscriptionLoan::SubscriptionLoan(
+  std::shared_ptr<rcl_subscription_t> subscription, void * message,
+  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view)
+: subscription_(std::move(subscription)), message_(message), state_(std::move(state)),
+  view_(std::move(view))
+{}
+
+SubscriptionLoan::~SubscriptionLoan()
+{
+  if (message_) {
+    state_->invalidate();
+    auto ret = rcl_return_loaned_message_from_subscription(subscription_.get(), message_);
+    if (ret != RCL_RET_OK) {
+      RCUTILS_LOG_ERROR_NAMED(
+        "rclpy", "Failed to return region subscription loan: %s", rcl_get_error_string().str);
+      rcl_reset_error();
+    }
+  }
+}
+
+py::object SubscriptionLoan::view() const
+{
+  if (!message_) {
+    throw std::logic_error("The subscription loan is no longer valid");
+  }
+  return view_;
+}
+
+bool SubscriptionLoan::valid() const {return message_ != nullptr;}
+
+void SubscriptionLoan::return_loan()
+{
+  if (!message_) {
+    throw std::logic_error("The subscription loan is no longer valid");
+  }
+  state_->invalidate();
+  auto ret = rcl_return_loaned_message_from_subscription(subscription_.get(), message_);
+  if (ret != RCL_RET_OK) {
+    throw RCLError("Failed to return region subscription loan");
+  }
+  message_ = nullptr;
+}
 
 Subscription::Subscription(
   Node & node, py::object pymsg_type, std::string topic,
   py::object pyqos_profile, py::object content_filter_options,
-  py::object acceptable_buffer_backends)
-: node_(node)
+  py::object acceptable_buffer_backends, py::object constraints)
+: node_(node), bridge_(get_view_bridge(pymsg_type))
 {
-  auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type));
+  if (!bridge_ && !constraints.is_none()) {
+    throw py::type_error("Constraints require a region message type");
+  }
+  const auto * msg_type = bridge_ ? bridge_->type_support() :
+    static_cast<rosidl_message_type_support_t *>(common_get_type_support(pymsg_type));
   if (!msg_type) {
+    if (!PyErr_Occurred()) {
+      throw py::value_error("Message type support is null");
+    }
     throw py::error_already_set();
   }
 
@@ -77,6 +154,16 @@ Subscription::Subscription(
 
   if (!pyqos_profile.is_none()) {
     subscription_ops.qos = pyqos_profile.cast<rmw_qos_profile_t>();
+  }
+  if (bridge_) {
+    const char * value = nullptr;
+    const char * error = rcutils_get_env("ROS_DISABLE_LOANED_MESSAGES", &value);
+    if (error) {
+      throw std::runtime_error(std::string("Failed to read loan setting: ") + error);
+    }
+    if (value && value[0] == '\0') {
+      subscription_ops.disable_loaned_message = false;
+    }
   }
 
   if (!acceptable_buffer_backends.is_none()) {
@@ -121,9 +208,17 @@ Subscription::Subscription(
     }
   }
 
-  rcl_ret_t ret = rcl_subscription_init(
-    rcl_subscription_.get(), node_.rcl_ptr(), msg_type,
-    topic.c_str(), &subscription_ops);
+  rcl_ret_t ret;
+  if (bridge_) {
+    ViewMessageContext context(std::move(constraints), *bridge_);
+    ret = rcl_subscription_init_with_context(
+      rcl_subscription_.get(), node_.rcl_ptr(), msg_type, context.get(),
+      topic.c_str(), &subscription_ops);
+  } else {
+    ret = rcl_subscription_init(
+      rcl_subscription_.get(), node_.rcl_ptr(), msg_type,
+      topic.c_str(), &subscription_ops);
+  }
   if (ret != RCL_RET_OK) {
     if (ret == RCL_RET_TOPIC_NAME_INVALID) {
       std::string error_text{"Failed to create subscription due to invalid topic name '"};
@@ -132,6 +227,9 @@ Subscription::Subscription(
       throw py::value_error(error_text);
     }
     throw rclpy::RCLError("Failed to create subscription");
+  }
+  if (bridge_ && !rcl_subscription_can_loan_messages(rcl_subscription_.get())) {
+    throw std::runtime_error("Middleware cannot loan region views for this subscription");
   }
 }
 
@@ -148,6 +246,9 @@ void Subscription::destroy()
 py::object
 Subscription::take_message(py::object pymsg_type, bool raw)
 {
+  if (bridge_) {
+    throw std::runtime_error("Region subscriptions require loaned takes");
+  }
   py::object pytaken_msg;
   rmw_message_info_t message_info;
   if (raw) {
@@ -185,33 +286,50 @@ Subscription::take_message(py::object pymsg_type, bool raw)
 
     pytaken_msg = convert_to_py(taken_msg.get(), pymsg_type);
   }
-  py::object pub_seq_number = py::none();
-  if (message_info.publication_sequence_number != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
-    pub_seq_number = py::int_(message_info.publication_sequence_number);
-  }
-  py::object rec_seq_number = py::none();
-  if (message_info.reception_sequence_number != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED) {
-    rec_seq_number = py::int_(message_info.reception_sequence_number);
-  }
+  return py::make_tuple(pytaken_msg, message_info_to_py(message_info));
+}
 
-  // Convert publisher_gid to Python dict with implementation_identifier and data
-  py::object publisher_gid = py::none();
-  if (message_info.publisher_gid.implementation_identifier != nullptr) {
-    publisher_gid = py::dict(
-      "implementation_identifier"_a = py::str(message_info.publisher_gid.implementation_identifier),
-      "data"_a = py::bytes(
-        reinterpret_cast<const char *>(message_info.publisher_gid.data),
-        RMW_GID_STORAGE_SIZE)
-    );
+py::object Subscription::take_loaned_message()
+{
+  if (!bridge_) {
+    throw py::type_error("Loaned region messages require a region subscription");
   }
-
-  return py::make_tuple(
-    pytaken_msg, py::dict(
-      "source_timestamp"_a = message_info.source_timestamp,
-      "received_timestamp"_a = message_info.received_timestamp,
-      "publication_sequence_number"_a = pub_seq_number,
-      "reception_sequence_number"_a = rec_seq_number,
-      "publisher_gid"_a = publisher_gid));
+  auto state = std::make_shared<rosidl_runtime_cpython::BorrowedViewState>();
+  auto subscription = rcl_subscription_;
+  void * message = nullptr;
+  rmw_message_info_t info{};
+  auto ret = rcl_take_loaned_message_with_context(
+    subscription.get(), nullptr, &message, &info, nullptr);
+  if (ret == RCL_RET_SUBSCRIPTION_TAKE_FAILED) {
+    rcl_reset_error();
+    return py::none();
+  }
+  if (ret != RCL_RET_OK) {
+    throw RCLError("Failed to take region subscription loan");
+  }
+  if (!message) {
+    throw std::runtime_error("Middleware returned a null region loan");
+  }
+  auto cleanup = rcpputils::make_scope_exit([&]() {
+        if (message) {
+          state->invalidate();
+          auto return_ret =
+          rcl_return_loaned_message_from_subscription(subscription.get(), message);
+          if (return_ret != RCL_RET_OK) {
+            RCUTILS_LOG_ERROR_NAMED(
+            "rclpy", "Failed to return region subscription loan: %s", rcl_get_error_string().str);
+            rcl_reset_error();
+          }
+        }
+    });
+  PyObject * wrapped = bridge_->wrap_loan(message, state, true);
+  if (!wrapped) {
+    throw py::error_already_set();
+  }
+  auto view = py::reinterpret_steal<py::object>(wrapped);
+  auto loan = std::make_shared<SubscriptionLoan>(subscription, message, state, std::move(view));
+  message = nullptr;
+  return py::make_tuple(loan, message_info_to_py(info));
 }
 
 const char *
@@ -380,14 +498,21 @@ Subscription::get_content_filter() const
 void
 define_subscription(py::object module)
 {
+  py::class_<SubscriptionLoan, std::shared_ptr<SubscriptionLoan>>(module, "SubscriptionLoan")
+  .def_property_readonly("view", &SubscriptionLoan::view)
+  .def_property_readonly("valid", &SubscriptionLoan::valid)
+  .def("return_loan", &SubscriptionLoan::return_loan);
   py::class_<Subscription, Destroyable, std::shared_ptr<Subscription>>(module, "Subscription")
-  .def(py::init<Node &, py::object, std::string, py::object, py::object, py::object>(),
+  .def(py::init<Node &, py::object, std::string, py::object, py::object, py::object, py::object>(),
     py::arg("node"),
     py::arg("msg_type"),
     py::arg("topic"),
     py::arg("qos_profile"),
     py::arg("content_filter_options") = py::none(),
-    py::arg("acceptable_buffer_backends") = py::none())
+    py::arg("acceptable_buffer_backends") = py::none(),
+    py::arg("constraints") = py::none())
+  .def_property_readonly("is_region", &Subscription::is_region)
+  .def("take_loaned_message", &Subscription::take_loaned_message)
   .def_property_readonly(
     "pointer", [](const Subscription & subscription) {
       return reinterpret_cast<size_t>(subscription.rcl_ptr());

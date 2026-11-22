@@ -25,11 +25,32 @@
 
 #include "destroyable.hpp"
 #include "node.hpp"
+#include "rosidl_runtime_cpython/bridge.hpp"
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class PublisherLoan
+{
+public:
+  PublisherLoan(
+    std::shared_ptr<rcl_publisher_t> publisher, void * message,
+    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view);
+  ~PublisherLoan();
+
+  py::object view() const;
+  bool valid() const;
+  void return_loan();
+  void publish(const std::shared_ptr<rcl_publisher_t> & publisher);
+
+private:
+  std::shared_ptr<rcl_publisher_t> publisher_;
+  void * message_;
+  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state_;
+  py::object view_;
+};
+
 /**
  * This class will create a publisher and attach it to the provided topic name
  * This publisher will use the typesupport defined in the message module
@@ -51,7 +72,7 @@ public:
    */
   Publisher(
     Node & node, py::object pymsg_type, std::string topic,
-    py::object pyqos_profile);
+    py::object pyqos_profile, py::object constraints = py::none());
 
   /// Get the name of the logger associated with the node of the publisher.
   /**
@@ -98,6 +119,12 @@ public:
   void
   publish_raw(std::string msg);
 
+  std::shared_ptr<PublisherLoan>
+  borrow_loaned_message(py::object constraints);
+
+  void
+  publish_loaned_message(PublisherLoan & loan);
+
   /// Get rcl_publisher_t pointer
   rcl_publisher_t *
   rcl_ptr() const
@@ -130,6 +157,8 @@ public:
 private:
   Node node_;
   std::shared_ptr<rcl_publisher_t> rcl_publisher_;
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge_{nullptr};
+  const rosidl_message_type_support_t * type_support_{nullptr};
 };
 /// Define a pybind11 wrapper for an rclpy::Publisher
 void define_publisher(py::object module);

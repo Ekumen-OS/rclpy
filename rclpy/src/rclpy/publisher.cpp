@@ -18,10 +18,14 @@
 #include <rcl/publisher.h>
 #include <rosidl_runtime_c/message_type_support_struct.h>
 #include <rmw/serialized_message.h>
+#include <rcutils/logging_macros.h>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
+#include <rcpputils/scope_exit.hpp>
 #include "exceptions.hpp"
 #include "node.hpp"
 #include "publisher.hpp"
@@ -29,14 +33,78 @@
 
 namespace rclpy
 {
+PublisherLoan::PublisherLoan(
+  std::shared_ptr<rcl_publisher_t> publisher, void * message,
+  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view)
+: publisher_(std::move(publisher)), message_(message), state_(std::move(state)),
+  view_(std::move(view))
+{}
+
+PublisherLoan::~PublisherLoan()
+{
+  if (message_) {
+    state_->invalidate();
+    auto ret = rcl_return_loaned_message_from_publisher(publisher_.get(), message_);
+    if (ret != RCL_RET_OK) {
+      RCUTILS_LOG_ERROR_NAMED(
+        "rclpy", "Failed to return region publisher loan: %s", rcl_get_error_string().str);
+      rcl_reset_error();
+    }
+  }
+}
+
+py::object PublisherLoan::view() const
+{
+  if (!message_) {
+    throw std::logic_error("The publisher loan is no longer valid");
+  }
+  return view_;
+}
+
+bool PublisherLoan::valid() const {return message_ != nullptr;}
+
+void PublisherLoan::return_loan()
+{
+  if (!message_) {
+    throw std::logic_error("The publisher loan is no longer valid");
+  }
+  state_->invalidate();
+  auto ret = rcl_return_loaned_message_from_publisher(publisher_.get(), message_);
+  if (ret != RCL_RET_OK) {
+    throw RCLError("Failed to return region publisher loan");
+  }
+  message_ = nullptr;
+}
+
+void PublisherLoan::publish(const std::shared_ptr<rcl_publisher_t> & publisher)
+{
+  if (!message_ || publisher_.get() != publisher.get()) {
+    throw py::value_error("Region loan does not belong to this publisher");
+  }
+  auto ret = rcl_publish_loaned_message(publisher_.get(), message_, nullptr);
+  if (ret != RCL_RET_PUBLISHER_INVALID) {
+    state_->invalidate();
+    message_ = nullptr;
+  }
+  if (ret != RCL_RET_OK) {
+    throw RCLError("Failed to publish region loan");
+  }
+}
+
 Publisher::Publisher(
   Node & node, py::object pymsg_type, std::string topic,
-  py::object pyqos_profile)
-: node_(node)
+  py::object pyqos_profile, py::object constraints)
+: node_(node), bridge_(get_view_bridge(pymsg_type))
 {
-  auto msg_type = static_cast<rosidl_message_type_support_t *>(
-    common_get_type_support(pymsg_type));
-  if (!msg_type) {
+  if (!bridge_ && !constraints.is_none()) {
+    throw py::type_error("Constraints require a region message type");
+  }
+  type_support_ = bridge_ ? bridge_->type_support() :
+    static_cast<rosidl_message_type_support_t *>(common_get_type_support(pymsg_type));
+  if (!type_support_) {
+    if (!PyErr_Occurred()) {
+      throw py::value_error("Message type support is null");
+    }
     throw py::error_already_set();
   }
 
@@ -60,9 +128,17 @@ Publisher::Publisher(
 
   *rcl_publisher_ = rcl_get_zero_initialized_publisher();
 
-  rcl_ret_t ret = rcl_publisher_init(
-    rcl_publisher_.get(), node_.rcl_ptr(), msg_type,
-    topic.c_str(), &publisher_ops);
+  rcl_ret_t ret;
+  if (bridge_) {
+    ViewMessageContext context(std::move(constraints), *bridge_);
+    ret = rcl_publisher_init_with_context(
+      rcl_publisher_.get(), node_.rcl_ptr(), type_support_, context.get(),
+      topic.c_str(), &publisher_ops);
+  } else {
+    ret = rcl_publisher_init(
+      rcl_publisher_.get(), node_.rcl_ptr(), type_support_,
+      topic.c_str(), &publisher_ops);
+  }
   if (RCL_RET_OK != ret) {
     if (RCL_RET_TOPIC_NAME_INVALID == ret) {
       std::string error_text{"Failed to create publisher due to invalid topic name '"};
@@ -71,6 +147,9 @@ Publisher::Publisher(
       throw py::value_error(error_text);
     }
     throw RCLError("Failed to create publisher");
+  }
+  if (bridge_ && !rcl_publisher_can_loan_messages(rcl_publisher_.get())) {
+    throw std::runtime_error("Middleware cannot loan region views for this publisher");
   }
 }
 
@@ -117,6 +196,9 @@ Publisher::get_topic_name()
 void
 Publisher::publish(py::object pymsg)
 {
+  if (bridge_) {
+    throw py::type_error("Region publishers require a loaned message");
+  }
   auto raw_ros_message = convert_from_py(pymsg);
   if (!raw_ros_message) {
     throw py::error_already_set();
@@ -128,9 +210,62 @@ Publisher::publish(py::object pymsg)
   }
 }
 
+std::shared_ptr<PublisherLoan>
+Publisher::borrow_loaned_message(py::object constraints)
+{
+  if (!bridge_) {
+    throw py::type_error("Loaned region messages require a region publisher");
+  }
+  auto state = std::make_shared<rosidl_runtime_cpython::BorrowedViewState>();
+  auto publisher = rcl_publisher_;
+  void * message = nullptr;
+  rcl_ret_t ret;
+  if (constraints.is_none()) {
+    ret = rcl_borrow_loaned_message_with_context(
+      publisher.get(), type_support_, nullptr, &message);
+  } else {
+    ViewMessageContext context(std::move(constraints), *bridge_);
+    ret = rcl_borrow_loaned_message_with_context(
+      publisher.get(), type_support_, context.get(), &message);
+  }
+  if (ret != RCL_RET_OK) {
+    throw RCLError("Failed to borrow region publisher loan");
+  }
+  if (!message) {
+    throw std::runtime_error("Middleware returned a null region loan");
+  }
+  auto cleanup = rcpputils::make_scope_exit([&]() {
+        if (message) {
+          state->invalidate();
+          auto return_ret = rcl_return_loaned_message_from_publisher(publisher.get(), message);
+          if (return_ret != RCL_RET_OK) {
+            RCUTILS_LOG_ERROR_NAMED(
+            "rclpy", "Failed to return region publisher loan: %s", rcl_get_error_string().str);
+            rcl_reset_error();
+          }
+        }
+    });
+  PyObject * wrapped = bridge_->wrap_loan(message, state, false);
+  if (!wrapped) {
+    throw py::error_already_set();
+  }
+  auto view = py::reinterpret_steal<py::object>(wrapped);
+  auto loan = std::make_shared<PublisherLoan>(publisher, message, state, std::move(view));
+  message = nullptr;
+  return loan;
+}
+
+void Publisher::publish_loaned_message(PublisherLoan & loan)
+{
+  loan.publish(rcl_publisher_);
+}
+
 void
 Publisher::publish_raw(std::string msg)
 {
+  if (bridge_) {
+    throw py::type_error("Region publishers require a loaned message");
+  }
   rcl_serialized_message_t serialized_msg = rmw_get_zero_initialized_serialized_message();
   serialized_msg.buffer_capacity = msg.size();
   serialized_msg.buffer_length = msg.size();
@@ -157,8 +292,22 @@ Publisher::wait_for_all_acked(rcl_duration_t pytimeout)
 void
 define_publisher(py::object module)
 {
+  py::class_<PublisherLoan, std::shared_ptr<PublisherLoan>>(module, "PublisherLoan")
+  .def_property_readonly("view", &PublisherLoan::view)
+  .def_property_readonly("valid", &PublisherLoan::valid)
+  .def("return_loan", &PublisherLoan::return_loan)
+  .def("__enter__", &PublisherLoan::view)
+  .def(
+    "__exit__", [](PublisherLoan & loan, py::object, py::object, py::object) {
+      if (loan.valid()) {
+        loan.return_loan();
+      }
+    });
   py::class_<Publisher, Destroyable, std::shared_ptr<Publisher>>(module, "Publisher")
-  .def(py::init<Node &, py::object, std::string, py::object>())
+  .def(
+    py::init<Node &, py::object, std::string, py::object, py::object>(),
+    py::arg("node"), py::arg("msg_type"), py::arg("topic"), py::arg("qos_profile"),
+    py::arg("constraints") = py::none())
   .def_property_readonly(
     "pointer", [](const Publisher & publisher) {
       return reinterpret_cast<size_t>(publisher.rcl_ptr());
@@ -179,6 +328,10 @@ define_publisher(py::object module)
   .def(
     "publish_raw", &Publisher::publish_raw,
     "Publish a serialized message.")
+  .def(
+    "borrow_loaned_message", &Publisher::borrow_loaned_message,
+    py::arg("constraints") = py::none())
+  .def("publish_loaned_message", &Publisher::publish_loaned_message)
   .def(
     "wait_for_all_acked", &Publisher::wait_for_all_acked,
     "Wait until all published message data is acknowledged");

@@ -111,6 +111,7 @@ from rclpy.validate_node_name import validate_node_name
 from rclpy.validate_parameter_name import validate_parameter_name
 from rclpy.validate_topic_name import validate_topic_name
 from rclpy.waitable import Waitable
+from rosidl_runtime_cpython.constraints import MessageConstraints
 from typing_extensions import TypeAlias
 
 
@@ -2027,6 +2028,7 @@ class BaseNode(ABC):
         qos_profile: QoSProfile,
         *,
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
+        constraints: Optional[MessageConstraints] = None,
     ) -> '_rclpy.Publisher[MsgT]':
         try:
             final_topic = self.resolve_topic_name(topic)
@@ -2050,7 +2052,7 @@ class BaseNode(ABC):
         try:
             with self.handle:
                 publisher_object = _rclpy.Publisher(
-                    self.handle, msg_type, topic, qos_profile.get_c_qos_profile())
+                    self.handle, msg_type, topic, qos_profile.get_c_qos_profile(), constraints)
         except ValueError:
             failed = True
         if failed:
@@ -2066,8 +2068,12 @@ class BaseNode(ABC):
         *,
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
         content_filter_options: Optional[ContentFilterOptions] = None,
-        acceptable_buffer_backends: Optional[str] = None
+        acceptable_buffer_backends: Optional[str] = None,
+        constraints: Optional[MessageConstraints] = None,
+        allow_region: bool = False,
     ) -> '_rclpy.Subscription[MsgT]':
+        if hasattr(msg_type, '__region_type_bridge__') and not allow_region:
+            raise TypeError('Region subscriptions require the standard Node executor')
         try:
             final_topic = self.resolve_topic_name(topic)
         except RuntimeError:
@@ -2091,7 +2097,7 @@ class BaseNode(ABC):
             with self.handle:
                 subscription_object = _rclpy.Subscription(
                     self.handle, msg_type, topic, qos_profile.get_c_qos_profile(),
-                    content_filter_options, acceptable_buffer_backends)
+                    content_filter_options, acceptable_buffer_backends, constraints)
         except ValueError:
             failed = True
         if failed:
@@ -2336,6 +2342,7 @@ class Node(BaseNode):
         event_callbacks: Optional[PublisherEventCallbacks] = None,
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
         publisher_class: Type[Publisher[MsgT]] = Publisher,
+        constraints: Optional[MessageConstraints] = None,
     ) -> Publisher[MsgT]:
         """
         Create a new publisher.
@@ -2352,6 +2359,7 @@ class Node(BaseNode):
         :param qos_overriding_options: Options to customize QoS parameter overrides.
         :param publisher_class: The class used to construct the publisher. It must be
             :class:`.Publisher` or a subclass of it.
+        :param constraints: Endpoint limits for a region message type.
         :return: The new publisher.
         """
         qos_profile_validated = self._validate_qos_or_depth_parameter(qos_profile)
@@ -2362,7 +2370,8 @@ class Node(BaseNode):
             msg_type,
             topic,
             qos_profile_validated,
-            qos_overriding_options=qos_overriding_options
+            qos_overriding_options=qos_overriding_options,
+            constraints=constraints,
         )
 
         try:
@@ -2396,6 +2405,7 @@ class Node(BaseNode):
         raw: Literal[True],
         content_filter_options: Optional[ContentFilterOptions] = None,
         acceptable_buffer_backends: Optional[str] = None,
+        constraints: Optional[MessageConstraints] = None,
         subscription_class: Type[Subscription[MsgT]] = Subscription
     ) -> Subscription[MsgT]: ...
 
@@ -2412,6 +2422,7 @@ class Node(BaseNode):
         qos_overriding_options: Optional[QoSOverridingOptions] = None,
         raw: Literal[False],
         content_filter_options: Optional[ContentFilterOptions] = None,
+        constraints: Optional[MessageConstraints] = None,
         subscription_class: Type[Subscription[MsgT]] = Subscription
     ) -> Subscription[MsgT]: ...
 
@@ -2429,6 +2440,7 @@ class Node(BaseNode):
         raw: bool = False,
         content_filter_options: Optional[ContentFilterOptions] = None,
         acceptable_buffer_backends: Optional[str] = None,
+        constraints: Optional[MessageConstraints] = None,
         subscription_class: Type[Subscription[MsgT]] = Subscription
     ) -> Subscription[MsgT]: ...
 
@@ -2445,6 +2457,7 @@ class Node(BaseNode):
         raw: bool = False,
         content_filter_options: Optional[ContentFilterOptions] = None,
         acceptable_buffer_backends: Optional[str] = None,
+        constraints: Optional[MessageConstraints] = None,
         subscription_class: Type[Subscription[MsgT]] = Subscription
     ) -> Subscription[MsgT]:
         """
@@ -2470,11 +2483,15 @@ class Node(BaseNode):
             CPU is always implicitly acceptable.
         :param subscription_class: The class used to construct the subscription. It must be
             :class:`.Subscription` or a subclass of it.
+        :param constraints: Endpoint limits for a region message type.
         :return: The new subscription.
         """
         qos_profile = self._validate_qos_or_depth_parameter(qos_profile)
 
         callback_group = callback_group or self.default_callback_group
+
+        if raw and hasattr(msg_type, '__region_type_bridge__'):
+            raise TypeError('Region subscriptions do not support raw messages')
 
         subscription_object = self._create_subscription_handle(
             msg_type,
@@ -2482,7 +2499,9 @@ class Node(BaseNode):
             qos_profile,
             qos_overriding_options=qos_overriding_options,
             content_filter_options=content_filter_options,
-            acceptable_buffer_backends=acceptable_buffer_backends
+            acceptable_buffer_backends=acceptable_buffer_backends,
+            constraints=constraints,
+            allow_region=True,
         )
 
         try:

@@ -26,6 +26,8 @@
 #include <memory>
 
 #include "publisher.hpp"
+#include "rosidl_runtime_c/message_context.h"
+#include "rosidl_runtime_cpython/bridge.hpp"
 
 namespace py = pybind11;
 
@@ -50,6 +52,24 @@ convert_to_py_names_and_types(const rcl_names_and_types_t * topic_names_and_type
  */
 void *
 common_get_type_support(py::object pymessage);
+
+const rosidl_runtime_cpython::MessageTypeBridge *
+get_view_bridge(py::handle message_type);
+
+/// Holds the Python constraints alive while the C context references them.
+class ViewMessageContext
+{
+public:
+  ViewMessageContext(
+    py::object constraints, const rosidl_runtime_cpython::MessageTypeBridge & bridge);
+
+  const rosidl_runtime_c__message_context_t * get() const {return &context_;}
+
+private:
+  py::object constraints_;
+  py::object type_specific_;
+  rosidl_runtime_c__message_context_t context_{};
+};
 
 /// Create the equivalent ROS message C type instance for a given Python type.
 /**

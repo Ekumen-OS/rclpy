@@ -24,6 +24,7 @@ from rclpy.event_handler import EventHandler, PublisherEventCallbacks
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import QoSProfile
 from rclpy.type_support import MsgT
+from rosidl_runtime_cpython.constraints import MessageConstraints
 
 from typing_extensions import Self
 
@@ -76,6 +77,18 @@ class BasePublisher(Generic[MsgT]):
         """Get the amount of subscribers that this publisher has."""
         with self.handle:
             return self.__publisher.get_subscription_count()
+
+    def borrow_loaned_message(
+        self, constraints: Optional[MessageConstraints] = None
+    ) -> '_rclpy.PublisherLoan[MsgT]':
+        """Borrow a region view; return or publish the loan when finished."""
+        with self.handle:
+            return self.__publisher.borrow_loaned_message(constraints)
+
+    def publish_loaned_message(self, loan: '_rclpy.PublisherLoan[MsgT]') -> None:
+        """Publish a region loan from this publisher."""
+        with self.handle:
+            self.__publisher.publish_loaned_message(loan)
 
     @property
     def topic_name(self) -> str:

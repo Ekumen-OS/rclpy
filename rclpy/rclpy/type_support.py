@@ -105,6 +105,8 @@ def check_for_type_support(msg_or_srv_type: type[Union[Msg,
 
 
 def check_is_valid_msg_type(msg_type: type[Msg]) -> None:
+    if hasattr(msg_type, '__region_type_bridge__'):
+        return
     check_for_type_support(msg_type)
     try:
         assert None not in (

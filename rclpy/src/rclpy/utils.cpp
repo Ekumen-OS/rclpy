@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rcpputils/scope_exit.hpp>
@@ -65,6 +66,52 @@ common_get_type_support(py::object pymessage)
   auto capsule_ptr = static_cast<void *>(value.cast<py::capsule>());
 
   return capsule_ptr;
+}
+
+const rosidl_runtime_cpython::MessageTypeBridge *
+get_view_bridge(py::handle message_type)
+{
+  if (!py::hasattr(message_type, "__region_type_bridge__")) {
+    return nullptr;
+  }
+  auto capsule = message_type.attr("__region_type_bridge__");
+  auto * bridge = static_cast<const rosidl_runtime_cpython::MessageTypeBridge *>(
+    PyCapsule_GetPointer(capsule.ptr(), rosidl_runtime_cpython::kMessageTypeBridgeCapsule));
+  if (!bridge) {
+    throw py::error_already_set();
+  }
+  if (!bridge->type_support || !bridge->wrap_loan || !bridge->unwrap_constraints) {
+    throw py::type_error("Incomplete region message type bridge");
+  }
+  return bridge;
+}
+
+ViewMessageContext::ViewMessageContext(
+  py::object constraints, const rosidl_runtime_cpython::MessageTypeBridge & bridge)
+: constraints_(std::move(constraints)), type_specific_(py::none())
+{
+  if (constraints_.is_none()) {
+    return;
+  }
+  py::object constraints_class = py::module_::import(
+    "rosidl_runtime_cpython.constraints").attr("MessageConstraints");
+  if (!py::isinstance(constraints_, constraints_class)) {
+    throw py::type_error("Expected MessageConstraints");
+  }
+  type_specific_ = constraints_.attr("type_specific");
+  if (!type_specific_.is_none()) {
+    context_.constraints.type_specific = bridge.unwrap_constraints(type_specific_.ptr());
+    if (!context_.constraints.type_specific) {
+      if (PyErr_Occurred()) {
+        throw py::error_already_set();
+      }
+      throw py::type_error("Invalid type-specific message constraints");
+    }
+  }
+  context_.constraints.max_string_length =
+    constraints_.attr("max_string_length").cast<size_t>();
+  context_.constraints.max_total_size = constraints_.attr("max_total_size").cast<size_t>();
+  context_.constraints.strict = constraints_.attr("strict").cast<bool>();
 }
 
 std::unique_ptr<void, destroy_ros_message_function *>

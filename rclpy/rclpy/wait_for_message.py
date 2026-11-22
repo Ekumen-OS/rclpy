@@ -41,6 +41,8 @@ def wait_for_message(
     :returns: (True, msg) if a message was successfully received, (False, None) if message
         could not be obtained or shutdown was triggered asynchronously on the context.
     """
+    if hasattr(msg_type, '__region_type_bridge__'):
+        raise TypeError('wait_for_message does not support region messages')
     context = node.context
 
     if context.handle is None:

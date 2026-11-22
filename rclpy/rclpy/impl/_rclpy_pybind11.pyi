@@ -239,9 +239,22 @@ class rcl_duration_t:
     def nanoseconds(self) -> int: ...
 
 
+class PublisherLoan(Generic[MsgT]):
+    @property
+    def view(self) -> MsgT: ...
+    @property
+    def valid(self) -> bool: ...
+    def return_loan(self) -> None: ...
+    def __enter__(self) -> MsgT: ...
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None: ...
+
+
 class Publisher(Destroyable, Generic[MsgT]):
 
-    def __init__(self, arg0: Node, arg1: type[MsgT], arg2: str, arg3: rmw_qos_profile_t) -> None:
+    def __init__(
+        self, arg0: Node, arg1: type[MsgT], arg2: str, arg3: rmw_qos_profile_t,
+        constraints: object | None = None,
+    ) -> None:
         """Create _rclpy.Publisher."""
 
     @property
@@ -262,6 +275,10 @@ class Publisher(Destroyable, Generic[MsgT]):
 
     def publish_raw(self, arg0: bytes) -> None:
         """Publish a serialized message."""
+
+    def borrow_loaned_message(self, constraints: object | None = None) -> PublisherLoan[MsgT]: ...
+
+    def publish_loaned_message(self, loan: PublisherLoan[MsgT]) -> None: ...
 
     def wait_for_all_acked(self, arg0: rcl_duration_t) -> bool:
         """Wait until all published message data is acknowledged."""
@@ -614,12 +631,26 @@ class Timer(Destroyable):
         """Clear the on reset callback function for the timer."""
 
 
+class SubscriptionLoan(Generic[MsgT]):
+    @property
+    def view(self) -> MsgT: ...
+    @property
+    def valid(self) -> bool: ...
+    def return_loan(self) -> None: ...
+
+
 class Subscription(Destroyable, Generic[MsgT]):
 
     def __init__(self, node: Node, pymsg_type: type[MsgT], topic: str,
                  pyqos_profile: rmw_qos_profile_t,
                  content_filter_options: Optional[ContentFilterOptions] = None,
-                 acceptable_buffer_backends: str | None = None) -> None: ...
+                 acceptable_buffer_backends: str | None = None,
+                 constraints: object | None = None) -> None: ...
+
+    @property
+    def is_region(self) -> bool: ...
+
+    def take_loaned_message(self) -> tuple[SubscriptionLoan[MsgT], MessageInfo] | None: ...
 
     @property
     def pointer(self) -> int:

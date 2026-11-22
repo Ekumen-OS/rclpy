@@ -22,6 +22,7 @@ find_package(rcutils REQUIRED)
 find_package(rmw REQUIRED)
 find_package(rmw_implementation_cmake REQUIRED)
 find_package(rosidl_runtime_c REQUIRED)
+find_package(rosidl_runtime_cpython REQUIRED)
 
 # By default, without the settings below, find_package(Python3) will attempt
 # to find the newest python version it can, and additionally will find the
@@ -121,6 +122,7 @@ endif()
 
 target_include_directories(_rclpy_pybind11 PRIVATE
   src/rclpy/
+  ${rosidl_runtime_cpython_INCLUDE_DIRS}
 )
 target_link_libraries(_rclpy_pybind11 PRIVATE
   ament_cmake_ros_core::ament_ros_cxx_standard
