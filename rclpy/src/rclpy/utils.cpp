@@ -18,8 +18,10 @@
 #include <rcl/arguments.h>
 #include <rcl/error_handling.h>
 #include <rcl/graph.h>
+#include <rcl/node.h>
 #include <rcl/publisher.h>
 #include <rcl_action/rcl_action.h>
+#include <rcutils/env.h>
 #include <rmw/rmw.h>
 #include <rmw/time.h>
 #include <rmw/topic_endpoint_info.h>
@@ -28,6 +30,7 @@
 #include <cassert>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,10 +83,73 @@ get_view_bridge(py::handle message_type)
   if (!bridge) {
     throw py::error_already_set();
   }
-  if (!bridge->type_support || !bridge->wrap_loan || !bridge->unwrap_constraints) {
+  if (!bridge->type_support || !bridge->wrap_loan || !bridge->unwrap_constraints ||
+    !bridge->plain_type_support || !bridge->create_view || !bridge->create_plain ||
+    !bridge->view_to_plain || !bridge->view_assign_plain || !bridge->copy_constraints ||
+    !bridge->constraints_compatible || !bridge->view_compatible)
+  {
     throw py::type_error("Incomplete region message type bridge");
   }
   return bridge;
+}
+
+bool region_loan_available(rmw_region_loan_role_t role)
+{
+  bool disabled = false;
+  if (rcl_get_disable_loaned_message(&disabled) != RCL_RET_OK) {
+    throw RCLError("Failed to read loan setting");
+  }
+  if (role == RMW_REGION_LOAN_SUBSCRIPTION && !disabled) {
+    const char * value = nullptr;
+    const char * error = rcutils_get_env("ROS_DISABLE_LOANED_MESSAGES", &value);
+    if (error) {
+      throw std::runtime_error(std::string("Failed to read loan setting: ") + error);
+    }
+    disabled = value && value[0] != '\0' && std::string(value) != "0";
+  }
+  bool available = false;
+  if (rmw_region_loan_entry_points_available(role, &available) != RMW_RET_OK) {
+    throw RMWError("Failed to query region loan support");
+  }
+  return available && !disabled;
+}
+
+bool region_loan_type_available(
+  rmw_region_loan_role_t role, const rosidl_runtime_cpython::MessageTypeBridge & bridge,
+  py::object constraints)
+{
+  ViewMessageContext context(std::move(constraints), bridge);
+  bool available = false;
+  if (rmw_region_loan_type_support_available(
+      role, bridge.type_support(), context.get(), nullptr, nullptr, &available) != RMW_RET_OK)
+  {
+    throw RMWError("Failed to query region loan type support");
+  }
+  return available;
+}
+
+std::shared_ptr<void> copy_region_constraints(
+  const rosidl_runtime_cpython::MessageTypeBridge & bridge,
+  const rosidl_runtime_c__message_context_t * context, const std::shared_ptr<void> & baseline)
+{
+  if (context && (context->constraints.max_string_length || context->constraints.max_total_size)) {
+    throw std::runtime_error("Copy fallback does not support blanket constraints");
+  }
+  const void * specific = context ? context->constraints.type_specific : nullptr;
+  if (context && context->constraints.strict && !specific && !baseline) {
+    throw std::runtime_error("Strict constraints require type-specific constraints");
+  }
+  if (!specific && baseline) {
+    return baseline;
+  }
+  auto result = bridge.copy_constraints(specific);
+  auto defaults = bridge.copy_constraints(nullptr);
+  if (!bridge.constraints_compatible(result.get(), defaults.get()) ||
+    (baseline && !bridge.constraints_compatible(result.get(), baseline.get())))
+  {
+    throw std::runtime_error("Invalid or looser region constraints");
+  }
+  return result;
 }
 
 ViewMessageContext::ViewMessageContext(

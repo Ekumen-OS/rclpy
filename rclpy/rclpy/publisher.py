@@ -78,6 +78,12 @@ class BasePublisher(Generic[MsgT]):
         with self.handle:
             return self.__publisher.get_subscription_count()
 
+    @property
+    def can_loan_messages(self) -> bool:
+        """Report whether this region publisher uses middleware loans."""
+        with self.handle:
+            return self.__publisher.can_loan_messages
+
     def borrow_loaned_message(
         self, constraints: Optional[MessageConstraints] = None
     ) -> '_rclpy.PublisherLoan[MsgT]':

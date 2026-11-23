@@ -91,15 +91,19 @@ message_info_to_py(const rmw_message_info_t & message_info)
 
 SubscriptionLoan::SubscriptionLoan(
   std::shared_ptr<rcl_subscription_t> subscription, void * message,
-  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view)
+  std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view,
+  std::shared_ptr<void> owned)
 : subscription_(std::move(subscription)), message_(message), state_(std::move(state)),
-  view_(std::move(view))
+  view_(std::move(view)), owned_(std::move(owned))
 {}
 
 SubscriptionLoan::~SubscriptionLoan()
 {
   if (message_) {
     state_->invalidate();
+    if (owned_) {
+      return;
+    }
     auto ret = rcl_return_loaned_message_from_subscription(subscription_.get(), message_);
     if (ret != RCL_RET_OK) {
       RCUTILS_LOG_ERROR_NAMED(
@@ -125,6 +129,11 @@ void SubscriptionLoan::return_loan()
     throw std::logic_error("The subscription loan is no longer valid");
   }
   state_->invalidate();
+  if (owned_) {
+    owned_.reset();
+    message_ = nullptr;
+    return;
+  }
   auto ret = rcl_return_loaned_message_from_subscription(subscription_.get(), message_);
   if (ret != RCL_RET_OK) {
     throw RCLError("Failed to return region subscription loan");
@@ -141,7 +150,12 @@ Subscription::Subscription(
   if (!bridge_ && !constraints.is_none()) {
     throw py::type_error("Constraints require a region message type");
   }
-  const auto * msg_type = bridge_ ? bridge_->type_support() :
+  if (bridge_) {
+    native_ = region_loan_available(RMW_REGION_LOAN_SUBSCRIPTION) &&
+      region_loan_type_available(RMW_REGION_LOAN_SUBSCRIPTION, *bridge_, constraints);
+  }
+  const auto * msg_type = bridge_ ? (native_ ? bridge_->type_support() :
+    bridge_->plain_type_support()) :
     static_cast<rosidl_message_type_support_t *>(common_get_type_support(pymsg_type));
   if (!msg_type) {
     if (!PyErr_Occurred()) {
@@ -155,7 +169,7 @@ Subscription::Subscription(
   if (!pyqos_profile.is_none()) {
     subscription_ops.qos = pyqos_profile.cast<rmw_qos_profile_t>();
   }
-  if (bridge_) {
+  if (bridge_ && native_) {
     const char * value = nullptr;
     const char * error = rcutils_get_env("ROS_DISABLE_LOANED_MESSAGES", &value);
     if (error) {
@@ -209,12 +223,17 @@ Subscription::Subscription(
   }
 
   rcl_ret_t ret;
-  if (bridge_) {
-    ViewMessageContext context(std::move(constraints), *bridge_);
+  if (bridge_ && native_) {
+    ViewMessageContext context(constraints, *bridge_);
     ret = rcl_subscription_init_with_context(
       rcl_subscription_.get(), node_.rcl_ptr(), msg_type, context.get(),
       topic.c_str(), &subscription_ops);
   } else {
+    if (bridge_) {
+      ViewMessageContext context(std::move(constraints), *bridge_);
+      constraints_ = copy_region_constraints(*bridge_, context.get());
+      subscription_ops.disable_loaned_message = true;
+    }
     ret = rcl_subscription_init(
       rcl_subscription_.get(), node_.rcl_ptr(), msg_type,
       topic.c_str(), &subscription_ops);
@@ -228,8 +247,48 @@ Subscription::Subscription(
     }
     throw rclpy::RCLError("Failed to create subscription");
   }
-  if (bridge_ && !rcl_subscription_can_loan_messages(rcl_subscription_.get())) {
-    throw std::runtime_error("Middleware cannot loan region views for this subscription");
+  if (bridge_ && native_ && !rcl_subscription_can_loan_messages(rcl_subscription_.get())) {
+    ViewMessageContext context(std::move(constraints), *bridge_);
+    constraints_ = copy_region_constraints(*bridge_, context.get());
+    auto copy_options = subscription_ops;
+    copy_options.rmw_subscription_options.acceptable_buffer_backends = nullptr;
+    copy_options.rmw_subscription_options.content_filter_options = nullptr;
+    auto cleanup_options = rcpputils::make_scope_exit([&copy_options]() {
+          if (rcl_subscription_options_fini(&copy_options) != RCL_RET_OK) {
+            warn_fini_failure("subscription options");
+          }
+      });
+    ret = rcl_subscription_options_set_acceptable_buffer_backends(
+      subscription_ops.rmw_subscription_options.acceptable_buffer_backends, &copy_options);
+    if (ret != RCL_RET_OK) {
+      throw RCLError("Failed to copy subscription buffer options");
+    }
+    const auto * filter = subscription_ops.rmw_subscription_options.content_filter_options;
+    if (filter) {
+      std::vector<const char *> parameters;
+      for (size_t i = 0; i < filter->expression_parameters.size; ++i) {
+        parameters.push_back(filter->expression_parameters.data[i]);
+      }
+      ret = rcl_subscription_options_set_content_filter_options(
+        filter->filter_expression, parameters.size(), parameters.data(), &copy_options);
+      if (ret != RCL_RET_OK) {
+        throw RCLError("Failed to copy subscription filter options");
+      }
+    }
+    ret = rcl_subscription_fini(rcl_subscription_.get(), node_.rcl_ptr());
+    if (ret != RCL_RET_OK) {
+      throw RCLError("Failed to finalize non-loaning subscription");
+    }
+    *rcl_subscription_ = rcl_get_zero_initialized_subscription();
+    copy_options.disable_loaned_message = true;
+    cleanup_options.cancel();
+    ret = rcl_subscription_init(
+      rcl_subscription_.get(), node_.rcl_ptr(), bridge_->plain_type_support(),
+      topic.c_str(), &copy_options);
+    if (ret != RCL_RET_OK) {
+      throw RCLError("Failed to create copy subscription");
+    }
+    native_ = false;
   }
 }
 
@@ -296,6 +355,32 @@ py::object Subscription::take_loaned_message()
   }
   auto state = std::make_shared<rosidl_runtime_cpython::BorrowedViewState>();
   auto subscription = rcl_subscription_;
+  if (!native_) {
+    auto plain = bridge_->create_plain();
+    rmw_message_info_t info{};
+    auto ret = rcl_take(subscription.get(), plain.get(), &info, nullptr);
+    if (ret == RCL_RET_SUBSCRIPTION_TAKE_FAILED) {
+      rcl_reset_error();
+      return py::none();
+    }
+    if (ret != RCL_RET_OK) {
+      throw RCLError("Failed to take region copy");
+    }
+    auto owned = bridge_->create_view();
+    bridge_->view_assign_plain(owned.get(), plain.get());
+    if (!bridge_->view_compatible(constraints_.get(), owned.get())) {
+      throw py::value_error("Received region copy exceeds constraints");
+    }
+    auto * message = owned.get();
+    auto * wrapped = bridge_->wrap_loan(message, state, true);
+    if (!wrapped) {
+      throw py::error_already_set();
+    }
+    auto view = py::reinterpret_steal<py::object>(wrapped);
+    auto loan = std::make_shared<SubscriptionLoan>(
+      subscription, message, state, std::move(view), std::move(owned));
+    return py::make_tuple(loan, message_info_to_py(info));
+  }
   void * message = nullptr;
   rmw_message_info_t info{};
   auto ret = rcl_take_loaned_message_with_context(
@@ -512,6 +597,7 @@ define_subscription(py::object module)
     py::arg("acceptable_buffer_backends") = py::none(),
     py::arg("constraints") = py::none())
   .def_property_readonly("is_region", &Subscription::is_region)
+  .def_property_readonly("can_loan_messages", &Subscription::can_loan_messages)
   .def("take_loaned_message", &Subscription::take_loaned_message)
   .def_property_readonly(
     "pointer", [](const Subscription & subscription) {

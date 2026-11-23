@@ -36,19 +36,26 @@ class PublisherLoan
 public:
   PublisherLoan(
     std::shared_ptr<rcl_publisher_t> publisher, void * message,
-    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view);
+    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view,
+    const rosidl_runtime_cpython::MessageTypeBridge * bridge = nullptr,
+    std::shared_ptr<void> owned = {}, std::shared_ptr<void> constraints = {});
   ~PublisherLoan();
 
   py::object view() const;
   bool valid() const;
   void return_loan();
-  void publish(const std::shared_ptr<rcl_publisher_t> & publisher);
+  void publish(
+    const std::shared_ptr<rcl_publisher_t> & publisher,
+    const std::shared_ptr<void> & baseline);
 
 private:
   std::shared_ptr<rcl_publisher_t> publisher_;
   void * message_;
   std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state_;
   py::object view_;
+  const rosidl_runtime_cpython::MessageTypeBridge * bridge_;
+  std::shared_ptr<void> owned_;
+  std::shared_ptr<void> constraints_;
 };
 
 /**
@@ -73,6 +80,8 @@ public:
   Publisher(
     Node & node, py::object pymsg_type, std::string topic,
     py::object pyqos_profile, py::object constraints = py::none());
+
+  bool can_loan_messages() const {return bridge_ && native_;}
 
   /// Get the name of the logger associated with the node of the publisher.
   /**
@@ -159,6 +168,8 @@ private:
   std::shared_ptr<rcl_publisher_t> rcl_publisher_;
   const rosidl_runtime_cpython::MessageTypeBridge * bridge_{nullptr};
   const rosidl_message_type_support_t * type_support_{nullptr};
+  bool native_{false};
+  std::shared_ptr<void> constraints_;
 };
 /// Define a pybind11 wrapper for an rclpy::Publisher
 void define_publisher(py::object module);

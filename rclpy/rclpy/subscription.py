@@ -158,6 +158,12 @@ class BaseSubscription(Generic[MsgT]):
             return self.__subscription.get_publisher_count()
 
     @property
+    def can_loan_messages(self) -> bool:
+        """Report whether this region subscription uses middleware loans."""
+        with self.handle:
+            return self.__subscription.can_loan_messages
+
+    @property
     def handle(self) -> '_rclpy.Subscription[MsgT]':
         return self.__subscription
 

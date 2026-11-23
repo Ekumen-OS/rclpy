@@ -39,7 +39,8 @@ class SubscriptionLoan
 public:
   SubscriptionLoan(
     std::shared_ptr<rcl_subscription_t> subscription, void * message,
-    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view);
+    std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state, py::object view,
+    std::shared_ptr<void> owned = {});
   ~SubscriptionLoan();
   py::object view() const;
   bool valid() const;
@@ -50,6 +51,7 @@ private:
   void * message_;
   std::shared_ptr<rosidl_runtime_cpython::BorrowedViewState> state_;
   py::object view_;
+  std::shared_ptr<void> owned_;
 };
 
 /// Create a subscription
@@ -91,6 +93,7 @@ public:
   take_message(py::object pymsg_type, bool raw);
 
   bool is_region() const {return bridge_ != nullptr;}
+  bool can_loan_messages() const {return bridge_ && native_;}
 
   py::object take_loaned_message();
 
@@ -178,6 +181,8 @@ private:
   std::function<void(size_t)> on_new_message_callback_{nullptr};
   std::shared_ptr<rcl_subscription_t> rcl_subscription_;
   const rosidl_runtime_cpython::MessageTypeBridge * bridge_{nullptr};
+  bool native_{false};
+  std::shared_ptr<void> constraints_;
 
   void
   set_callback(rcl_event_callback_t callback, const void * user_data);

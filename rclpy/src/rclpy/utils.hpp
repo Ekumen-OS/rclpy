@@ -22,6 +22,7 @@
 #include <rcl_action/graph.h>  // rcl_action_endpoint_info_array_t
 #include <rmw/topic_endpoint_info.h>
 #include <rmw/types.h>
+#include <rmw/rmw.h>
 
 #include <memory>
 
@@ -70,6 +71,17 @@ private:
   py::object type_specific_;
   rosidl_runtime_c__message_context_t context_{};
 };
+
+bool region_loan_available(rmw_region_loan_role_t role);
+
+bool region_loan_type_available(
+  rmw_region_loan_role_t role, const rosidl_runtime_cpython::MessageTypeBridge & bridge,
+  py::object constraints);
+
+std::shared_ptr<void> copy_region_constraints(
+  const rosidl_runtime_cpython::MessageTypeBridge & bridge,
+  const rosidl_runtime_c__message_context_t * context,
+  const std::shared_ptr<void> & baseline = {});
 
 /// Create the equivalent ROS message C type instance for a given Python type.
 /**

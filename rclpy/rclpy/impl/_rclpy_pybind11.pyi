@@ -261,6 +261,9 @@ class Publisher(Destroyable, Generic[MsgT]):
     def pointer(self) -> int:
         """Get the address of the entity as an integer."""
 
+    @property
+    def can_loan_messages(self) -> bool: ...
+
     def get_logger_name(self) -> str:
         """Get the name of the logger associated with the node of the publisher."""
 
@@ -649,6 +652,9 @@ class Subscription(Destroyable, Generic[MsgT]):
 
     @property
     def is_region(self) -> bool: ...
+
+    @property
+    def can_loan_messages(self) -> bool: ...
 
     def take_loaned_message(self) -> tuple[SubscriptionLoan[MsgT], MessageInfo] | None: ...
 
